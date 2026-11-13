@@ -220,6 +220,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 {
   "outcome": "done" | "nothing" | "failed" | "cancelled",
   "summary": "一句话", "error": "没跑成的原因", "session": "…",
+  "diagnosis": { "category": "rate_limited", "explain": "一句白话", "device": "…", "agent": "…", "model": "…", "next": "wait_until", "waitUntil": "…", "raw": "原文", "output": "原文在哪" },
   "usage": { "input": 0, "output": 0, "cached": 0, "cost": 0 },
   // 下面就是回执，一个事务里一次生效
   "ask":     [{ "title", "text", "options": ["…", "…"], "recommend": 0, "about": "留给接着干的自己", "key": "这件事的固定名字" }],
@@ -232,6 +233,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 
 - 结果可以重放：响应丢了，同一个 token 再交一次同样的内容，得到同样的确认；内容不同返回 409。
 - `failed` 会重派，所以它只带 `notice`，其余的不生效；本人要停的这一轮交 `failed` 不再重派，`notice` 也不生效。
+- `diagnosis` 可选，由接单程序按退出码、stderr、stdout 和进程状态补上，Agent 插件可以用 `classify` 先认一遍。`category` 是固定分类代码（表见[回执分类](ai-loop/回执分类.md)），`next` 由类别推出。要人处理的分类（`need_login`、`need_approval`、`auth_invalid`、`env_missing`）不再自动重派，改成问题卡片；限流和额度（`rate_limited`、`quota_exhausted`）记 `waitUntil` 进 `model_holds`，照常重派，跨 Agent 改派以后再做；接单程序不在线、领走没报到、回执读不懂由中台自己补分类。`unclassified` 必须带 `raw` 原文和 `output` 位置。老回执没有 `diagnosis` 照收，由中台按结局补一个。
 - 需要本人恢复连接、登录或身份验证时，用 `done` 结束本轮并交 `ask`，不交 `failed`。`done` 表示本轮结束，未完成的事项由卡片继续跟进，不代表网页已经验收。同一阻塞已有 `open` 卡片时不重复提问，不用 `later` 定时重试；`waiting` 里同一阻塞已有的复查用 `cancel` 取消。保留已完成业务，`about` 写清恢复后只做哪些剩余步骤。
 - `usage` 由接单程序上报本次执行的用量，包含这次执行的回执重写；每一项都可以没有：`input`、`output`、`cached` 是 Token 数，`cost` 是美元。`input` 是全部输入，包括从缓存读的和写进缓存的；`cached` 是其中从缓存读的部分，价格通常只有一小部分，所以单独列出。中台把同一轮各次执行的已报数值相加，重复提交不重复计费；没有上报的字段保持缺省，不当成零。`agent-autoloop status` 按完成时间汇总今天和最近 7 天已结束的轮次，没上报的轮数如实写出来。
 - 有的 Agent 只给会话累计值（Codex 的 Token、Claude Code 的费用）。接单程序减去这次启动前的累计值再上报，所以这里总是本次的量；没有记录的续接不报这几项，详见[插件说明](plugins.md#agent-插件)。
