@@ -6,8 +6,47 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { findProgram, tail, type Adapter } from "../../worker/agents.ts";
 import { readMessage, receiptBlock } from "../../worker/contract.ts";
+import { matchError, type ErrorRule } from "../../worker/diagnose.ts";
 
 const PERMISSIONS = { read: "plan", edit: "acceptEdits", full: "bypassPermissions" };
+
+// 待真实样本校准：Claude Code 报错文字的已知写法，真实样本来了再校准这张表。
+const RULES: ErrorRule[] = [
+  {
+    category: "quota_exhausted",
+    pattern: /out of extra usage|credit balance|purchase more|insufficient funds|余额不足/i,
+    explain: "额度用尽",
+  },
+  {
+    category: "rate_limited",
+    pattern: /usage limit|rate limit|hit (the|your) limit|limit reached|too many requests/i,
+    explain: "被限流",
+  },
+  {
+    category: "auth_invalid",
+    pattern: /oauth.{0,30}(expired|invalid)|invalid api key|authentication failed|\b401\b/i,
+    explain: "鉴权失效",
+  },
+  { category: "need_login", pattern: /not logged in|please (log ?in|run \/login)|\/login\b/i, explain: "需要登录" },
+  {
+    category: "transient_error",
+    pattern: /overloaded|api error|internal server error|server error/i,
+    explain: "服务临时不可用",
+  },
+];
+
+// 待真实样本校准：「Try again at HH:MM(am|pm)」「resets at HH:MM」按本机时区解成时刻；看不出来就不猜。
+function resetsAt(text: string): string | undefined {
+  const found = /(?:try again|resets?) at (\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i.exec(text);
+  if (!found) return undefined;
+  let hour = Number(found[1]);
+  if (found[3]?.toLowerCase() === "pm" && hour < 12) hour += 12;
+  if (found[3]?.toLowerCase() === "am" && hour === 12) hour = 0;
+  const at = new Date();
+  at.setHours(hour, Number(found[2] ?? 0), 0, 0);
+  if (at.getTime() <= Date.now()) at.setDate(at.getDate() + 1);
+  return at.toISOString();
+}
 
 /** The newest Claude Code the desktop app ships, for those without a separate install. */
 export function inTheApp() {
@@ -105,6 +144,29 @@ export default {
       return { ...known, usage, sessionUsage, finished: true, error };
     }
     return { text, ...known, usage, sessionUsage, finished: true };
+  },
+  classify(stdout, stderr, _code) {
+    const messages = stdout.split("\n").flatMap((line) => {
+      try {
+        return [JSON.parse(line)].flat();
+      } catch {
+        return [];
+      }
+    });
+    const result = messages.findLast((message) => message?.type === "result");
+    const said = String(result?.result ?? "");
+    // 报错可能在 result 的首行、errors 列表或 subtype 里；stderr 也一并给通用规则看。
+    const text = [said.split("\n")[0], ...(result?.errors ?? []), result?.subtype, stderr].filter(Boolean).join("\n");
+    const matched = matchError(text, RULES);
+    if (matched) return { ...matched, waitUntil: resetsAt(text) };
+    if (result && (result.is_error || result.subtype !== "success")) {
+      return {
+        category: "agent_error",
+        explain: said.split("\n")[0] || result.errors?.[0] || `subtype ${result.subtype}`,
+      };
+    }
+    // 没有 result 或没认出：交给通用规则和退出码兜底。
+    return matchError(stderr) ?? null;
   },
   link: (session) => `claude://resume?session=${session}`,
   check(given) {

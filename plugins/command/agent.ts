@@ -1,6 +1,7 @@
 // Anything with a print mode: its command line in rules.json, its last message on stdout. A script is an agent too, and
 // a plain command needn't take the prompt at all: it finds what it needs through the environment (AGENT_AUTOLOOP_CONTEXT).
 import { tail, type Adapter } from "../../worker/agents.ts";
+import { matchError } from "../../worker/diagnose.ts";
 
 const PLACEHOLDER = /\{(prompt|model|effort|cwd|context)\}/g;
 
@@ -21,5 +22,10 @@ export default {
     if (code === null) return {};
     if (code !== 0) return { error: `退出码 ${code}：${tail(stderr || stdout) || "没留下原因"}` };
     return { text: stdout };
+  },
+  // 通用命令没有自己的报错格式：126/127 是 shell 的「找不到/没权限」，其余交给通用规则，最后按退出码算。
+  classify(stdout, stderr, code) {
+    if (code === 126 || code === 127) return { category: "env_missing", explain: "找不到命令或没有权限运行" };
+    return matchError(`${stderr}\n${stdout}`) ?? (code !== null && code !== 0 ? { category: "crashed" } : null);
   },
 } satisfies Adapter;

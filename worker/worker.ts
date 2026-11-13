@@ -26,6 +26,7 @@ import { commandLine, processCommand } from "../host/command.ts";
 import type { Job } from "../protocol/job.ts";
 import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
 import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from "./agents.ts";
+import { diagnose } from "./diagnose.ts";
 import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
 import { loadUsage, saveUsage, usageDelta } from "./usage.ts";
 
@@ -306,9 +307,53 @@ export function createWorker({
     log(`run ${entry.run} (${rule.name}) turn ${entry.turn} started, pid ${child.pid}`);
   }
 
+  /** 输出文件的末尾一段，够分类时匹配报错和留原文用了。 */
+  function tailOf(file: string, length = 8 * 1024) {
+    if (!existsSync(file)) return "";
+    const size = statSync(file).size;
+    const fd = openSync(file, "r");
+    try {
+      const buffer = Buffer.alloc(Math.min(size, length));
+      readSync(fd, buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+      return buffer.toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  }
+
   function endWith(entry: Entry, result: Result) {
     entry.result = result;
     save(entry);
+  }
+
+  /** 一轮交差前把分类补上：Agent 自己在回执里写了就信它，否则按退出码、输出和进程状态生成。 */
+  function complete(
+    entry: Entry,
+    result: Result,
+    extra: {
+      adapter?: Adapter | null;
+      code?: number | null;
+      stdout?: string;
+      stderr?: string;
+      unreadable?: boolean;
+    } = {},
+  ) {
+    result.diagnosis ??= diagnose({
+      outcome: result.outcome,
+      why: entry.why,
+      error: result.error,
+      stdout: extra.stdout ?? tailOf(files(entry).out),
+      stderr: extra.stderr ?? tailOf(files(entry).err),
+      code: extra.code,
+      adapter: extra.adapter,
+      unreadable: extra.unreadable,
+      device: name,
+      agent: entry.job.agent.id,
+      model: entry.job.agent.model,
+      output: entry.dir,
+      now,
+    });
+    endWith(entry, result);
   }
 
   async function start(job: Job) {
@@ -336,7 +381,7 @@ export function createWorker({
       save(entry);
       launch(entry, adapter, entry.prompt);
     } catch (error) {
-      endWith(entry, { outcome: "failed", error: String((error as Error).message ?? error).slice(0, 500) });
+      complete(entry, { outcome: "failed", error: String((error as Error).message ?? error).slice(0, 500) });
     }
   }
 
@@ -365,7 +410,16 @@ export function createWorker({
       title: `「${entry.job.rule.name}」的回执读不懂`,
       text: `这一轮按第一行算结束了，但它要中台做的事没有生效（${problem}）。原文在 ${files(original).out}，留 ${KEEP_DAYS} 天。`,
     };
-    endWith(entry, { ...result, notice: [...(result.notice ?? []), notice] });
+    complete(
+      entry,
+      { ...result, notice: [...(result.notice ?? []), notice] },
+      {
+        adapter,
+        stdout: tailOf(files(original).out),
+        stderr: tailOf(files(original).err),
+        unreadable: true,
+      },
+    );
   }
 
   /** A turn has ended. What it said is a result, or a reason to ask it again without redoing anything. */
@@ -377,12 +431,16 @@ export function createWorker({
     if (seen.session) entry.session = seen.session;
     const usage = entry.usage && { usage: entry.usage };
     const known = session && { session };
-    if (entry.why === "cancel") return endWith(entry, { outcome: "cancelled", summary: "已停止", ...known, ...usage });
+    // 分类要看的：stdout/stderr 末尾、退出码、这个回合是谁停的。
+    const ctx = { adapter, code, stdout: tailOf(files(entry).out), stderr: tailOf(files(entry).err) };
+    if (entry.why === "cancel") {
+      return complete(entry, { outcome: "cancelled", summary: "已停止", ...known, ...usage }, ctx);
+    }
     if (entry.why === "timeout") {
       const minutes = entry.job.agent.timeout ?? TIMEOUT_MINUTES;
       const error = `超过 ${minutes} 分钟还没结束，已停止`;
       if (entry.repairs) return discardReceipt(entry, adapter, error);
-      return endWith(entry, { outcome: "failed", error, ...known, ...usage });
+      return complete(entry, { outcome: "failed", error, ...known, ...usage }, ctx);
     }
     if (seen.error !== undefined || !seen.text?.trim()) {
       const error = seen.error || "没留下结果";
@@ -398,14 +456,14 @@ export function createWorker({
           launch(entry, adapter, entry.prompt);
           return;
         } catch (failure) {
-          return endWith(entry, { outcome: "failed", error: String(failure).slice(0, 500) });
+          return complete(entry, { outcome: "failed", error: String(failure).slice(0, 500) }, ctx);
         }
       }
-      return endWith(entry, { outcome: "failed", error: error.slice(0, 500), ...known, ...usage });
+      return complete(entry, { outcome: "failed", error: error.slice(0, 500), ...known, ...usage }, ctx);
     }
     const { result, problem } = resultFrom(readMessage(seen.text), { session, usage: entry.usage });
     if (entry.repairs && !problem && result.outcome === "failed") return discardReceipt(entry, adapter, result.error!);
-    if (!problem) return endWith(entry, result);
+    if (!problem) return complete(entry, result, ctx);
     // Its work is done and only the receipt is wrong: it writes the receipt again, and does nothing again.
     if (entry.repairs < REPAIRS && seen.session) {
       log(`run ${entry.run}: receipt not readable (${problem}); asking again`);
@@ -428,7 +486,7 @@ export function createWorker({
     try {
       adapter = await adapterFor(entry.job.agent.use);
     } catch (error) {
-      return endWith(entry, { outcome: "failed", error: String((error as Error).message).slice(0, 500) });
+      return complete(entry, { outcome: "failed", error: String((error as Error).message).slice(0, 500) });
     }
     if (entry.turn === 0) {
       // The worker stopped while starting it, before anything was launched.
@@ -439,7 +497,11 @@ export function createWorker({
         });
         return launch(entry, adapter, entry.prompt);
       } catch (error) {
-        return endWith(entry, { outcome: "failed", error: String((error as Error).message ?? error).slice(0, 500) });
+        return complete(
+          entry,
+          { outcome: "failed", error: String((error as Error).message ?? error).slice(0, 500) },
+          { adapter },
+        );
       }
     }
     const { exit } = files(entry);
@@ -459,10 +521,14 @@ export function createWorker({
         if (entry.why !== "cancel") return conclude(entry, adapter, exitCode());
         // Reporting `cancelled` would release the item while a process may still be in it, which the protocol forbids
         // (docs/protocol.md: 确认组内没有活进程后才交 cancelled). A cancelled run's `failed` isn't tried again.
-        return endWith(entry, {
-          outcome: "failed",
-          error: "停止信号发出后没能确认进程组已结束：这一轮按没跑成记，不再重试，进程可能还在。",
-        });
+        return complete(
+          entry,
+          {
+            outcome: "failed",
+            error: "停止信号发出后没能确认进程组已结束：这一轮按没跑成记，不再重试，进程可能还在。",
+          },
+          { adapter, code: exitCode() },
+        );
       }
       return conclude(entry, adapter, exitCode());
     }
