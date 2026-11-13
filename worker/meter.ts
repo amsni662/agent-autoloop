@@ -338,22 +338,25 @@ export function createMeter({
           date,
           rows: Object.entries(
             // Keys written before empty names were normalized still sit in state; fold them into "?" here.
-            Object.entries(state.days[date]).reduce((rows, [key, counted]) => {
-              const [agent, model, source] = key.split("|").map((part) => part || "?");
-              const row = (rows[`${agent}|${model}|${source}`] ??= {
-                agent,
-                model,
-                source,
-                input: 0,
-                output: 0,
-                cache_read: 0,
-                cache_write: 0,
-                runs: 0,
-              });
-              for (const name of ["input", "output", "cache_read", "cache_write", "runs"] as const)
-                row[name] += counted[name];
-              return rows;
-            }, {} as Record<string, UsageRow>),
+            Object.entries(state.days[date]).reduce(
+              (rows, [key, counted]) => {
+                const [agent, model, source] = key.split("|").map((part) => part || "?");
+                const row = (rows[`${agent}|${model}|${source}`] ??= {
+                  agent,
+                  model,
+                  source,
+                  input: 0,
+                  output: 0,
+                  cache_read: 0,
+                  cache_write: 0,
+                  runs: 0,
+                });
+                for (const name of ["input", "output", "cache_read", "cache_write", "runs"] as const)
+                  row[name] += counted[name];
+                return rows;
+              },
+              {} as Record<string, UsageRow>,
+            ),
           ).map(([, row]) => row),
         })),
         ...(state.quotas !== undefined && { quotas: state.quotas }),

@@ -116,7 +116,12 @@ test("days saved with an empty-name key report it folded into ?", async () => {
   await meter.tick();
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].days, [
-    { date: TODAY, rows: [{ agent: "a1", model: "?", source: "gateway", input: 3, output: 3, cache_read: 0, cache_write: 0, runs: 2 }] },
+    {
+      date: TODAY,
+      rows: [
+        { agent: "a1", model: "?", source: "gateway", input: 3, output: 3, cache_read: 0, cache_write: 0, runs: 2 },
+      ],
+    },
   ]);
 });
 
