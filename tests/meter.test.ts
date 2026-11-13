@@ -95,6 +95,31 @@ test("a gateway line with an empty agent or model is counted under ?", async () 
   ]);
 });
 
+test("days saved with an empty-name key report it folded into ?", async () => {
+  mkdirSync(join(home, "worker"), { recursive: true });
+  writeFileSync(
+    STATE_FILE,
+    JSON.stringify({
+      files: {},
+      sessions: {},
+      dirty: [TODAY],
+      days: {
+        [TODAY]: {
+          "a1||gateway": { input: 1, output: 1, cache_read: 0, cache_write: 0, runs: 1 },
+          "a1|?|gateway": { input: 2, output: 2, cache_read: 0, cache_write: 0, runs: 1 },
+        },
+      },
+    }),
+  );
+  const { sent, meter } = watch([]);
+  tickAfter(2 * MINUTE);
+  await meter.tick();
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].days, [
+    { date: TODAY, rows: [{ agent: "a1", model: "?", source: "gateway", input: 3, output: 3, cache_read: 0, cache_write: 0, runs: 2 }] },
+  ]);
+});
+
 test("a line half-written is read when its rest arrives", async () => {
   const file = join(files, "gw-half.jsonl");
   writeFileSync(file, `${JSON.stringify({ t: stamp, agent: "a1", model: "m1", in: 1, out: 1 })}`.slice(0, 20));

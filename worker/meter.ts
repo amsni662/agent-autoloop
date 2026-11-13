@@ -19,7 +19,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import type { MeterSource } from "../host/config.ts";
 import { HOME } from "../host/home.ts";
-import { dateTime, type QuotaRow, type UsageReport } from "../protocol/validate.ts";
+import { dateTime, type QuotaRow, type UsageReport, type UsageRow } from "../protocol/validate.ts";
 
 const STATE_FILE = path.join(HOME, "worker", "metering.json");
 /** Sources are looked at this often; each look reads only what a file grew by. */
@@ -336,10 +336,25 @@ export function createMeter({
       body: {
         days: dates.map((date) => ({
           date,
-          rows: Object.entries(state.days[date]).map(([key, counted]) => {
-            const [agent, model, source] = key.split("|");
-            return { agent, model, source, ...counted };
-          }),
+          rows: Object.entries(
+            // Keys written before empty names were normalized still sit in state; fold them into "?" here.
+            Object.entries(state.days[date]).reduce((rows, [key, counted]) => {
+              const [agent, model, source] = key.split("|").map((part) => part || "?");
+              const row = (rows[`${agent}|${model}|${source}`] ??= {
+                agent,
+                model,
+                source,
+                input: 0,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                runs: 0,
+              });
+              for (const name of ["input", "output", "cache_read", "cache_write", "runs"] as const)
+                row[name] += counted[name];
+              return rows;
+            }, {} as Record<string, UsageRow>),
+          ).map(([, row]) => row),
         })),
         ...(state.quotas !== undefined && { quotas: state.quotas }),
       } as UsageReport,
