@@ -12,6 +12,9 @@ type AgentOptions = {
 };
 export type Agent = AgentOptions & { name: string; worker: string; use: string; access: Access; maxActive?: number };
 export type Channel = { name: string; answerers?: string[]; links?: boolean };
+/** A registered project: its rules, its working directory and its archive. `archive` names where the archive lives when
+ * it isn't the hub's own store; the dispatch itself decides the address a worker is given. */
+export type Project = { name: string; cwd: string; archive?: string };
 export type Tell = "always" | "needed" | "never";
 type EventFilter = { source: string; types: string[] };
 type When = EventFilter | { cron: string };
@@ -23,6 +26,8 @@ type RuleOptions = RuleWords & {
   maxActive?: number;
   resume?: boolean;
   emits?: EventFilter;
+  /** The project this rule belongs to: its runs read the project's archive first and write back when done. */
+  project?: string;
 };
 /** Without channels a rule's cards reach the default ones, or every channel if there are none; with them, only those. */
 type Reach = { channels?: string[] };
@@ -42,7 +47,12 @@ export type Elsewhere = RuleWords & {
   effort?: string;
   cwd?: string;
 };
-type Registered = { sources: Record<string, Source>; agents: Record<string, Agent>; channels: Record<string, Channel> };
+type Registered = {
+  sources: Record<string, Source>;
+  agents: Record<string, Agent>;
+  channels: Record<string, Channel>;
+  projects?: Record<string, Project>;
+};
 export type Rules = Registered & {
   timezone: string;
   askFirst: string[];

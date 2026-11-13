@@ -71,6 +71,7 @@ const HELP = `Agent 自动化中台
   agent-autoloop mcp                      用标准输入输出连接 MCP 客户端
   agent-autoloop join <中台地址> --worker <名字> --key <密钥> [--no-service]
                                     另一台电脑只接活时用
+  agent-autoloop archive                 项目档案：列出、查看（可指定版本）、写回、同步到私密桶
   agent-autoloop backup [目录]           备份数据库、主密钥、配置、规则和 secrets.env；不填目录就放在 ~/.agent-autoloop/backups
   agent-autoloop restore <目录> [--yes]  停掉中台后，用一次备份恢复本机数据
   agent-autoloop update                  更新到最新发布的版本
@@ -81,6 +82,18 @@ const HELP = `Agent 自动化中台
   agent-autoloop service install|remove  系统服务
 
 配置和数据在 ${HOME}。规则在 ${RULES_FILE}，改了自动生效。`;
+
+const ARCHIVE_USAGE = `用法：agent-autoloop archive <动作>
+
+  agent-autoloop archive                     列出各项目的档案和版本
+  agent-autoloop archive show <项目> [--version 第几版]
+                                             查看档案：当前版本，或指定的某一版
+  agent-autoloop archive init <项目>         建档（第一次写回也会自动建档，不用特意执行）
+  agent-autoloop archive write <项目>        写回，JSON 从标准输入传：
+                                             { "base": 读到的版本, "log": ["…"], "status": "新摘要", "decisions": ["…"] }
+  agent-autoloop archive sync [项目]         同步一次到私密桶；不写项目就推全部
+  agent-autoloop archive pull <项目> --to <目录>
+                                             从私密桶拉一份只读副本到本地目录（中枢不在时用）`;
 
 const INIT_USAGE = `用法：agent-autoloop init [--agent claude|codex] [--command '某个命令 {prompt}'] [--port 3350] [--no-service]
 
@@ -123,6 +136,7 @@ const RESTORE_USAGE = `用法：agent-autoloop restore <目录> [--yes]
 const TAKES: Record<string, { flags: string[]; usage: string }> = {
   add: { flags: [], usage: "用法：agent-autoloop add <git 地址>" },
   answer: { flags: ["text"], usage: "用法：agent-autoloop answer <卡片> [序号] [--text 别的想法]" },
+  archive: { flags: ["version", "to"], usage: ARCHIVE_USAGE },
   ask: {
     flags: ["task"],
     usage: `用法：agent-autoloop ask --task <定时任务名>，问题从标准输入读：
@@ -914,6 +928,7 @@ const commands: Record<string, () => unknown> = {
   runs: () => runs(args),
   conformance: () => checkConformance(args),
   answer: () => answer(args),
+  archive: async () => (await import("../archive/cli.ts")).archiveCommand(args),
   resolve: () => resolve(args),
   doctor,
   check: () => check(args),
