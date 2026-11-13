@@ -1,6 +1,9 @@
 // The protocol's own checks, with no state behind them: the hub applies them at its door, and a worker applies them to
 // an Agent's receipt before handing it in, while the Agent can still be asked to write it again.
 import { InputError } from "../kernel/errors.ts";
+import { CATEGORIES, NEXTS, type Diagnosis } from "./diagnosis.ts";
+export type { Category, Diagnosis, Next } from "./diagnosis.ts";
+export { CATEGORIES, NEXTS, NEED_OWNER, HOLD_MODEL, LABELS, nextOf } from "./diagnosis.ts";
 
 export const EVENT_TYPE = /^[a-z][a-z0-9_.-]{0,63}$/;
 /** What the protocol allows a card answer to carry: the schema says so, and the hub keeps it. */
@@ -28,6 +31,8 @@ export type Result = {
   error?: string;
   session?: string;
   usage?: Usage;
+  /** 结构化分类，老回执可以没有。含义与分组见 docs/ai-loop/回执分类.md。 */
+  diagnosis?: Diagnosis;
   ask?: Ask[];
   notice?: Notice[];
   resolve?: { card: number; reason: string }[];
@@ -147,6 +152,21 @@ const validLater = (later: Item) =>
     ? later.at === undefined
     : dateTime(later.at) && text(later.about, 4000) && later.cancel === undefined);
 
+const validDiagnosis = (diagnosis: Item) =>
+  only(diagnosis, ["category", "explain", "device", "agent", "model", "next", "waitUntil", "raw", "output"]) &&
+  typeof diagnosis.category === "string" &&
+  CATEGORIES.includes(diagnosis.category as Diagnosis["category"]) &&
+  optional(diagnosis.explain, 500) &&
+  optional(diagnosis.device, 200) &&
+  optional(diagnosis.agent, 200) &&
+  optional(diagnosis.model, 200) &&
+  (diagnosis.next === undefined || NEXTS.includes(diagnosis.next as (typeof NEXTS)[number])) &&
+  (diagnosis.waitUntil === undefined || dateTime(diagnosis.waitUntil)) &&
+  optional(diagnosis.raw, 4000) &&
+  optional(diagnosis.output, 500) &&
+  // 兜底分类必须带原始输出位置和原文，不能只写「执行不了」。
+  (diagnosis.category !== "unclassified" || (text(diagnosis.raw, 4000) && text(diagnosis.output, 500)));
+
 const validUsage = (usage: unknown) =>
   usage === undefined ||
   (isItem(usage) &&
@@ -158,7 +178,19 @@ export function parseResult(input: unknown): Result {
   }
   const result = { ...input } as Item;
   if (
-    !only(result, ["outcome", "summary", "error", "session", "usage", "ask", "notice", "resolve", "later", "events"])
+    !only(result, [
+      "outcome",
+      "summary",
+      "error",
+      "session",
+      "usage",
+      "diagnosis",
+      "ask",
+      "notice",
+      "resolve",
+      "later",
+      "events",
+    ])
   ) {
     throw new InputError("结果里有不认识的字段");
   }
@@ -169,6 +201,9 @@ export function parseResult(input: unknown): Result {
     throw new InputError("summary、error、session 最多 500 字");
   }
   if (!validUsage(result.usage)) throw new InputError("usage 要是对象，里面要是有限的非负数字");
+  if (result.diagnosis !== undefined && !(isItem(result.diagnosis) && validDiagnosis(result.diagnosis as Item))) {
+    throw new InputError("diagnosis 的 category 要是已知分类；unclassified 要带 raw 和 output");
+  }
   if (!listOf(result.ask, 5, validAsk)) {
     throw new InputError("ask 每一项要有 title、text 和 2 到 5 个 options，recommend 是其中一个的序号，最多 5 项");
   }
