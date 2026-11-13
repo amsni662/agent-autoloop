@@ -112,7 +112,7 @@ export function createMeter({
 
   function count(date: string, agent: string, model: string, source: string, add: Counted) {
     const day = (state.days[date] ??= {});
-    const row = (day[`${agent}|${model}|${source}`] ??= {
+    const row = (day[`${agent || "?"}|${model || "?"}|${source}`] ??= {
       input: 0,
       output: 0,
       cache_read: 0,

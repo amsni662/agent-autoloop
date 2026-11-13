@@ -77,6 +77,24 @@ test("gateway lines are counted once, by day and agent and model", async () => {
   assert.equal(again.runs, 3);
 });
 
+test("a gateway line with an empty agent or model is counted under ?", async () => {
+  const file = join(files, "gw.jsonl");
+  writeFileSync(
+    file,
+    `${JSON.stringify({ t: stamp, agent: "", model: "", in: 1, out: 1 })}\n` +
+      `${JSON.stringify({ t: stamp, agent: "a1", in: 2, out: 1 })}\n`,
+  );
+  const { sent, meter } = watch([{ kind: "gateway", file }]);
+  tickAfter(2 * MINUTE);
+  await meter.tick();
+  assert.equal(sent.length, 1);
+  const rows = sent[0].days.find((d: any) => d.date === TODAY).rows;
+  assert.deepEqual(rows, [
+    { agent: "?", model: "?", source: "gateway", input: 1, output: 1, cache_read: 0, cache_write: 0, runs: 1 },
+    { agent: "a1", model: "?", source: "gateway", input: 2, output: 1, cache_read: 0, cache_write: 0, runs: 1 },
+  ]);
+});
+
 test("a line half-written is read when its rest arrives", async () => {
   const file = join(files, "gw-half.jsonl");
   writeFileSync(file, `${JSON.stringify({ t: stamp, agent: "a1", model: "m1", in: 1, out: 1 })}`.slice(0, 20));
