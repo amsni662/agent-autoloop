@@ -91,6 +91,12 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["tell", (value) => TELLS.includes(value as string), `只能是 ${TELLS.join("、")}`, true],
     ["emits", isObject, "要是一个对象", true],
     ["channels", isSomeWords, "要是通道编号的列表", true],
+    [
+      "project",
+      (value) => typeof value === "string" && Object.hasOwn(rules.projects ?? {}, value),
+      `不是已登记的项目：${isObject(rule) ? rule.project : ""}`,
+      true,
+    ],
   ]);
   if (isObject(when) && "source" in when) {
     checkFields(issues, `${where}的 when `, when, [
@@ -136,6 +142,7 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
     ["sources", isObject, "要是一个对象"],
     ["agents", isObject, "要是一个对象"],
     ["channels", isObject, "要是一个对象", true],
+    ["projects", isObject, "要是一个对象", true],
     ["defaultChannels", isSomeWords, "要是通道编号的列表", true],
     ["rules", Array.isArray, "要是一个列表"],
     ["elsewhere", Array.isArray, "要是一个列表", true],
@@ -166,6 +173,14 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
   for (const channel of rules.defaultChannels ?? []) {
     if (!Object.hasOwn(rules.channels, channel))
       issues.push(`rules.json 的 defaultChannels 不是已登记的通道：${channel}`);
+  }
+  for (const [id, project] of Object.entries(rules.projects ?? {})) {
+    if (!ID.test(id)) issues.push(`项目的编号${ID_WORDS}：${id}`);
+    checkFields(issues, `项目 ${id} `, project, [
+      ["name", isText, NOT_EMPTY],
+      ["cwd", isFolder, FOLDER],
+      ["archive", isText, NOT_EMPTY, true],
+    ]);
   }
   for (const [id, agent] of Object.entries(rules.agents)) {
     if (!ID.test(id)) issues.push(`Agent 的编号${ID_WORDS}：${id}`);

@@ -65,6 +65,10 @@
     },
   },
   "channels": { "feishu": { "name": "飞书", "answerers": ["ou_xxx"] } },
+  "projects": {
+    // 可选：项目登记。一个项目是一组规则、一个工作目录和一份档案；规则写 "project": "shop" 就归进去
+    "shop": { "name": "商城", "cwd": "~/code/shop", "archive": "archive/shop" },
+  },
   "defaultChannels": ["feishu"], // 可选：自己没写 channels 的卡片和通知（tell、中台自己的告警、别处定时任务的提问、没写 channels 的规则）只发到这几个通道，不写就发到所有通道
   "rules": [
     {
@@ -72,6 +76,7 @@
       "when": { "source": "shop", "types": ["alert.*"] }, // 或 { "cron": "0 9 * * *" }
       "to": "claude",
       "cwd": "~/code/shop",
+      "project": "shop", // 可选：这条规则属于已登记的项目；不写就按原样运行
       "skill": "run-ops",
       "prompt": "按其中……一节处理。",
       "title": "alert-{id}", // 可选：会话标题，放在提示词第一行；{subject} 是这一轮事件共同的对象，{id} 是它按 / # : 分开的最后一段
