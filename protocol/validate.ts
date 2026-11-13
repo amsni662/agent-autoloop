@@ -220,3 +220,114 @@ export function parseResult(input: unknown): Result {
   }
   return result as Result;
 }
+
+/** One line of a device's day: what an agent on a model through a source spent. Counters are disjoint: input is what
+ * wasn't cache, cache_read what was read from it, cache_write what filled it. */
+export type UsageRow = {
+  agent: string;
+  model: string;
+  source: string;
+  input: number;
+  output: number;
+  cache_read: number;
+  cache_write: number;
+  runs: number;
+};
+/** A quota window a provider says it has, as the device last read it. */
+export type QuotaRow = {
+  provider: string;
+  account: string;
+  plan?: string;
+  window: string;
+  used_pct: number;
+  resets_at: string;
+  /** When the device read this snapshot. */
+  at?: string;
+};
+/** What a worker reports: whole days, each replacing what it said of that day before, and its quota snapshot. */
+export type UsageReport = {
+  days?: { date: string; rows: UsageRow[] }[];
+  quotas?: QuotaRow[];
+};
+
+const DAY_LIMIT = 62;
+const DAY_ROWS = 200;
+const QUOTA_LIMIT = 100;
+const COUNTERS = ["input", "output", "cache_read", "cache_write", "runs"] as const;
+
+/** A name in the report: printable, and never the separator the stored key is joined with. */
+const tag = (value: unknown): value is string =>
+  typeof value === "string" && value.length >= 1 && value.length <= 200 && !/[\x00-\x1f|]/.test(value);
+const optionalTag = (value: unknown) => value === undefined || tag(value);
+
+/** A calendar date, not a moment: real month and day, leap years counted. */
+function isDate(value: unknown): value is string {
+  const parts = typeof value === "string" ? /^(\d{4})-(\d\d)-(\d\d)$/.exec(value) : null;
+  if (!parts) return false;
+  const [year, month, day] = parts.slice(1).map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysIn = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysIn[month - 1];
+}
+
+const counter = (value: unknown) => value === undefined || (Number.isSafeInteger(value) && (value as number) >= 0);
+
+const validUsageRow = (row: Item) =>
+  only(row, ["agent", "model", "source", ...COUNTERS]) &&
+  tag(row.agent) &&
+  tag(row.model) &&
+  tag(row.source) &&
+  COUNTERS.every((name) => counter(row[name]));
+
+const validQuotaRow = (row: Item) =>
+  only(row, ["provider", "account", "plan", "window", "used_pct", "resets_at", "at"]) &&
+  tag(row.provider) &&
+  tag(row.account) &&
+  tag(row.window) &&
+  optionalTag(row.plan) &&
+  typeof row.used_pct === "number" &&
+  Number.isFinite(row.used_pct) &&
+  row.used_pct >= 0 &&
+  row.used_pct <= 100 &&
+  dateTime(row.resets_at) &&
+  (row.at === undefined || dateTime(row.at));
+
+/** The door is the only thing between the wire and the log, so the report's whole shape is checked here. */
+export function parseUsageReport(input: unknown): UsageReport {
+  if (!isItem(input)) throw new InputError("用量上报要是一个 JSON 对象");
+  const given = input as Item;
+  if (!only(given, ["days", "quotas"])) throw new InputError("用量上报里有不认识的字段");
+  if (given.days !== undefined) {
+    const ok =
+      Array.isArray(given.days) &&
+      given.days.length <= DAY_LIMIT &&
+      given.days.every(
+        (day) =>
+          isItem(day) &&
+          only(day, ["date", "rows"]) &&
+          isDate(day.date) &&
+          Array.isArray(day.rows) &&
+          day.rows.length <= DAY_ROWS &&
+          day.rows.every((row: unknown) => isItem(row) && validUsageRow(row as Item)),
+      );
+    if (!ok) {
+      throw new InputError(
+        `days 每一项要有 date（YYYY-MM-DD）和最多 ${DAY_ROWS} 行：` +
+          "{agent, model, source, input, output, cache_read, cache_write, runs}，名字不带 |，计数是非负整数",
+      );
+    }
+  }
+  if (given.quotas !== undefined && !(Array.isArray(given.quotas) && given.quotas.every(isItem))) {
+    throw new InputError("quotas 要是一个列表");
+  }
+  if (Array.isArray(given.quotas)) {
+    const ok = given.quotas.length <= QUOTA_LIMIT && (given.quotas as Item[]).every(validQuotaRow);
+    if (!ok) {
+      throw new InputError(
+        `quotas 最多 ${QUOTA_LIMIT} 项，每项是 ` +
+          "{provider, account, plan?, window, used_pct, resets_at}：used_pct 是 0 到 100，resets_at 要带时区",
+      );
+    }
+  }
+  return given as UsageReport;
+}

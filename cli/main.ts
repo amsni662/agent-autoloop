@@ -40,6 +40,8 @@ const HELP = `Agent 自动化中台
                                     在测试中台上检查协议
   agent-autoloop status [--json]         现在什么情况：谁在线、等你什么、在做什么、做过什么、花了多少
                                      --json 输出 /v1/state 的原始结构，给脚本用
+  agent-autoloop usage [--days 7] [--device 名字] [--json]
+                                    各设备的全部模型用量：按天、按设备、按 Agent、缓存占比和额度
   agent-autoloop runs [规则] [--before <第几轮>] [--json]
                                     列出做完的轮次，可以只看一条规则、往前翻；细节再用 why
   agent-autoloop answer <卡片> [序号] [--text 别的想法]
@@ -106,6 +108,14 @@ const INIT_USAGE = `用法：agent-autoloop init [--agent claude|codex] [--comma
 const TRY_USAGE = `用法：agent-autoloop try
 
 用本机接好的 Agent 跑一遍完整流程：提问，进程退出等你回复，你拍板，它接着干完。`;
+
+const USAGE_CMD_USAGE = `用法：agent-autoloop usage [--days 7] [--device 名字] [--json]
+
+各设备的全部模型用量：接到的活的，和这台电脑上别的方式用掉的，按天、按设备、按 Agent、按模型，
+缓存占多少、各供应商额度还剩多少。
+  --days     看最近几天（1 到 93），默认 7
+  --device   只看一台设备
+  --json     输出 /v1/usage 的原始结构，给脚本用`;
 
 const STATUS_USAGE = `用法：agent-autoloop status [--json]
 
@@ -185,6 +195,7 @@ rules.json 里这个定时任务要写 cwd；你答了，中台叫醒它的 Agen
   tell: { flags: ["task"], usage: "用法：agent-autoloop tell <编号> [--task 定时任务名]，内容从标准输入读" },
   try: { flags: [], usage: TRY_USAGE },
   uninstall: { flags: ["yes"], usage: UNINSTALL_USAGE },
+  usage: { flags: ["days", "device", "json"], usage: USAGE_CMD_USAGE },
   up: { flags: [], usage: "用法：agent-autoloop up" },
   update: { flags: [], usage: UPDATE_USAGE },
   why: { flags: ["json"], usage: "用法：agent-autoloop why <第几轮> [--json]" },
@@ -491,6 +502,17 @@ async function tryIt() {
     }
   }
   fail("五分钟没等到结果。运行 agent-autoloop doctor 看看。");
+}
+
+async function usage(args: string[]) {
+  const { named, rest } = flags(args);
+  if (rest.length || named.days === true) return fail(USAGE_CMD_USAGE);
+  const days = Math.max(1, Math.min(93, Number(text(named.days) ?? "7") || 7));
+  const device = text(named.device);
+  const view = await ownerClient().usage({ days, ...(device !== undefined && { device }) });
+  if (named.json !== undefined) return console.log(JSON.stringify(view, null, 2));
+  const { usageText } = await import("./usage.ts");
+  console.log(usageText(view, { days }));
 }
 
 async function status(named: Flags) {
@@ -924,6 +946,7 @@ const commands: Record<string, () => unknown> = {
   up: async () => (await import("../host/up.ts")).up(),
   try: () => tryIt(),
   status: () => status(flags(args).named),
+  usage: () => usage(args),
   why: () => why(args),
   runs: () => runs(args),
   conformance: () => checkConformance(args),

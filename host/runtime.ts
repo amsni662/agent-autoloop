@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { HOME, RULES_FILE } from "./home.ts";
 import { privateDirectory } from "./files.ts";
-import { skippedOf, stateOf as state, viewStatements } from "./state.ts";
+import { skippedOf, stateOf as state, usageOf, viewStatements } from "./state.ts";
 import { cardHash, digest, whose as keyHolder } from "../kernel/credentials.ts";
 import { decide } from "../kernel/decide.ts";
 import { NotFound } from "../kernel/errors.ts";
@@ -153,7 +153,26 @@ export function stateOf(now = Date.now(), before?: number) {
   db.exec("BEGIN");
   try {
     const latest = getView();
-    return { seq: latest.seq, ...state(now, before, query.configuration(latest), { all, view, unrouted }) };
+    return {
+      seq: latest.seq,
+      ...state(now, before, query.configuration(latest), {
+        all,
+        view,
+        unrouted,
+        config: (version) => query.configuration(latest, version),
+      }),
+    };
+  } finally {
+    db.exec("COMMIT");
+  }
+}
+
+/** The devices' usage rows and quota windows, aggregated as /v1/usage answers. */
+export function usageView(now = Date.now(), options: { days?: number; device?: string } = {}) {
+  db.exec("BEGIN");
+  try {
+    const latest = getView();
+    return usageOf(all, (version) => query.configuration(latest, version), query.configuration(latest), options, now);
   } finally {
     db.exec("COMMIT");
   }

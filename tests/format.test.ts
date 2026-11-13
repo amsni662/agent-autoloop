@@ -68,7 +68,7 @@ test("what doesn't decide what's stored can change without a rebuild", () => {
     ["host/runtime.ts", "export const listKeys", "// a comment\nexport const listKeys"],
     ["host/runtime.ts", "const { problem } = reloadRules();", 'const { problem } = reloadRules(); void "other work";'],
     ["kernel/decide.ts", "const MAX_ATTEMPTS = 10;", "const MAX_ATTEMPTS = 11;"],
-    ["host/state.ts", 'summary error usage diagnosis"', 'summary error usage diagnosis extra"'],
+    ["host/state.ts", 'summary error usage diagnosis rules_version"', 'summary error usage diagnosis extra"'],
   ] as const) {
     assert.equal(formatWith(file, before, after), usual, `${file}: ${after}`);
   }
@@ -114,11 +114,17 @@ test("a change to the read-only views shows at the next start, with no rebuild",
   const usual = start();
   const path = join(code, "host", "state.ts");
   const original = readFileSync(path, "utf8");
-  writeFileSync(path, original.replace('summary error usage diagnosis"', 'summary error usage diagnosis rules_version"'));
+  writeFileSync(
+    path,
+    original.replace(
+      'summary error usage diagnosis rules_version"',
+      'summary error usage diagnosis rules_version extra"',
+    ),
+  );
   try {
     assert.equal(start(), usual);
     const db = new DatabaseSync(join(home, "hub.db"), { readOnly: true });
-    assert.doesNotThrow(() => db.prepare("SELECT rules_version FROM runs").all());
+    assert.doesNotThrow(() => db.prepare("SELECT extra FROM runs").all());
     db.close();
   } finally {
     writeFileSync(path, original);

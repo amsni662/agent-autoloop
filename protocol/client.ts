@@ -38,6 +38,8 @@ export function hubClient(url: string, key: string) {
     started: (run: number, token: string, body: { session?: string; link?: string }) =>
       call("POST", `/v1/runs/${run}/started`, { token, body }),
     result: (run: number, token: string, body: unknown) => call("POST", `/v1/runs/${run}/result`, { token, body }),
+    /** The worker's usage report: whole days and a quota snapshot, each replacing what it sent of them before. */
+    usageReport: (body: unknown) => call("POST", "/v1/usage", { body }),
     // The channel's door.
     nextCard: (wait: number) => call("GET", `/v1/cards/next?wait=${wait}`, { timeout: wait + 30 }),
     delivered: (card: number, version: number, ref: string | null) =>
@@ -53,6 +55,13 @@ export function hubClient(url: string, key: string) {
     removeKey: (kind: string, name: string) =>
       call("DELETE", `/v1/keys/${encodeURIComponent(kind)}/${encodeURIComponent(name)}`),
     state: (before?: number) => call("GET", before === undefined ? "/v1/state" : `/v1/state?before=${before}`),
+    usage: ({ days, device }: { days?: number; device?: string } = {}) => {
+      const query = new URLSearchParams();
+      if (days !== undefined) query.set("days", String(days));
+      if (device !== undefined) query.set("device", device);
+      const suffix = query.size ? `?${query}` : "";
+      return call("GET", `/v1/usage${suffix}`);
+    },
     cancel: (run: number) => call("POST", `/v1/runs/${run}/cancel`, { body: {} }),
     resolve: (card: number, reason: string) => call("POST", `/v1/cards/${card}/resolve`, { body: { reason } }),
     // Rule control: facts in the log, rules.json stays as the owner wrote it.

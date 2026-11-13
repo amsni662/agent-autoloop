@@ -12,7 +12,7 @@ const VIEWS = {
   events: "id source key type subject summary detail link routed paused received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
-    "claimed_at seen_at finished_at manual summary error usage diagnosis",
+    "claimed_at seen_at finished_at manual summary error usage diagnosis rules_version",
   run_events: "run_id event_id",
   cards:
     "id key kind title text detail options recommend about state fyi quiet choice answer by result rule lane grp source " +
@@ -24,6 +24,8 @@ const VIEWS = {
   keys: "kind name hash created_at",
   pauses: "name by reason since until",
   model_holds: "model until reason by run at",
+  usage: "device date agent model source input output cache_read cache_write runs at",
+  quotas: "device provider account plan window used_pct resets_at at",
 };
 
 /** Made anew at every start, so changing them takes no rebuild and no migration. */
@@ -71,6 +73,8 @@ type Reads = {
   all: <T>(sql: string, params?: SQLInputValue[]) => T[];
   view: (card: Row) => ReturnType<typeof cardView>;
   unrouted: () => Row[];
+  /** The rules a version held, for saying which device a dispatched run spent on; defaults to the latest. */
+  config?: (version?: number) => Rules;
 };
 
 const sum = (counted: Row[], field: string): number => counted.reduce((total, row) => total + row[field], 0);
@@ -78,6 +82,106 @@ const sum = (counted: Row[], field: string): number => counted.reduce((total, ro
 export function spendingOf(all: Reads["all"], now: number, timezone: string) {
   const since = (time: number) => all<Spending>(SPENDING, [iso(time)])[0];
   return { today: since(dayStart(now, timezone)), week: since(now - WEEK) };
+}
+
+export type UsageTotals = { input: number; output: number; cached: number; cost: number; runs: number };
+const blankTotals = (): UsageTotals => ({ input: 0, output: 0, cached: 0, cost: 0, runs: 0 });
+
+/** en-CA is the locale whose date reads YYYY-MM-DD, which is what devices send their days as. */
+const dateOf = (ms: number, zone: string) =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(ms);
+
+/** All-input accounting, the spending convention: a metered row's input leaves the cache out, a run's has it in. */
+const countedOf = (row: Row): UsageTotals => ({
+  input: row.input + (row.source === "runs" ? 0 : row.cache_read + row.cache_write),
+  output: row.output,
+  cached: row.cache_read,
+  cost: row.cost ?? 0,
+  runs: row.runs,
+});
+
+/**
+ * What every device spent, day by day: the usage rows its worker reported, and the usage of the runs the hub gave it
+ * — a worker leaves its own launched sessions out of its report, so the two never count the same spend. Each
+ * (device, date, agent, model, source) line stays readable as a row of `rows`; `days` and `devices` are its sums.
+ */
+export function usageOf(
+  all: Reads["all"],
+  configOf: (version?: number) => Rules,
+  rules: Rules,
+  { days = 7, device }: { days?: number; device?: string },
+  now = Date.now(),
+) {
+  const zone = rules.timezone;
+  const first = dayStart(now - (days - 1) * 86400_000, zone);
+  const since = dateOf(first, zone);
+  const until = dateOf(now, zone);
+  const rows = all<Row>(
+    `SELECT device, date, agent, model, source, input, output, cache_read, cache_write, runs, at FROM usage
+     WHERE date >= ?${device ? " AND device = ?" : ""} ORDER BY date, device, agent, model, source`,
+    device ? [since, device] : [since],
+  );
+  const spent = all<Row>(
+    "SELECT agent, rules_version, finished_at, usage FROM runs WHERE finished_at >= ? AND usage IS NOT NULL",
+    [iso(first)],
+  );
+  for (const run of spent) {
+    const agents = configOf(run.rules_version ?? undefined).agents;
+    const owner = agents[run.agent];
+    const deviceName = owner?.worker ?? "?";
+    if (device && deviceName !== device) continue;
+    const usage = JSON.parse(run.usage);
+    rows.push({
+      device: deviceName,
+      date: dateOf(Date.parse(run.finished_at), zone),
+      agent: run.agent,
+      model: owner?.model ?? "",
+      source: "runs",
+      input: usage.input ?? 0,
+      output: usage.output ?? 0,
+      cache_read: usage.cached ?? 0,
+      cache_write: 0,
+      runs: 1,
+      at: run.finished_at,
+      cost: usage.cost,
+    });
+  }
+  const days_: { date: string; devices: Record<string, UsageTotals>; total: UsageTotals }[] = [];
+  const byDay = new Map<string, (typeof days_)[number]>();
+  const devices: Record<string, UsageTotals> = {};
+  const total = blankTotals();
+  const add = (into: UsageTotals, row: Row) => {
+    const counted = countedOf(row);
+    into.input += counted.input;
+    into.output += counted.output;
+    into.cached += counted.cached;
+    into.cost += counted.cost;
+    into.runs += counted.runs;
+  };
+  for (const row of rows) {
+    let day = byDay.get(row.date);
+    if (!day) {
+      day = { date: row.date, devices: {}, total: blankTotals() };
+      byDay.set(row.date, day);
+      days_.push(day);
+    }
+    add((day.devices[row.device] ??= blankTotals()), row);
+    add(day.total, row);
+    add((devices[row.device] ??= blankTotals()), row);
+    add(total, row);
+  }
+  days_.sort((a, b) => a.date.localeCompare(b.date));
+  rows.sort((a, b) =>
+    `${a.date}${a.device}${a.agent}${a.model}${a.source}`.localeCompare(
+      `${b.date}${b.device}${b.agent}${b.model}${b.source}`,
+    ),
+  );
+  const quotas = all<Row>(
+    `SELECT device, provider, account, plan, window, used_pct, resets_at, at FROM quotas
+     ${device ? "WHERE device = ?" : ""} ORDER BY device, provider, account, window`,
+    device ? [device] : [],
+  );
+  return { now: iso(now), timezone: zone, since, until, days: days_, devices, total, rows, quotas };
 }
 
 function tally(counted: Row[]) {
@@ -124,7 +228,7 @@ export function skippedOf(all: Reads["all"], rule: string, since: string, everyt
   return { count, events: events.map(skippedView) };
 }
 
-export function stateOf(now: number, before: number | undefined, rules: Rules, { all, view, unrouted }: Reads) {
+export function stateOf(now: number, before: number | undefined, rules: Rules, { all, view, unrouted, config }: Reads) {
   const seen = new Map(
     all<Row>("SELECT kind, name, seen_at FROM seen").map((row) => [`${row.kind}:${row.name}`, row.seen_at as string]),
   );
@@ -165,10 +269,18 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
   const skippedAt = new Map(
     all<Row>("SELECT rule, skipped_at FROM schedules").map((row) => [row.rule, row.skipped_at]),
   );
+  // Metered device reports and dispatched-run usage side by side: `usage` is the whole spend, `spending` stays runs only.
+  const usage = usageOf(all, config ?? (() => rules), rules, { days: 7 }, now);
+  const today = usage.days.find((day) => day.date === usage.until);
   return {
     now: iso(now),
     timezone: rules.timezone,
     spending: spendingOf(all, now, rules.timezone),
+    usage: {
+      today: { devices: today?.devices ?? {}, total: today?.total ?? blankTotals() },
+      week: { devices: usage.devices, total: usage.total },
+      quotas: usage.quotas,
+    },
     totals: { ...tally(counts), attention: openCards.length },
     // The owner's own: which matter a card is about, and what its asker left for whoever carries on. Channels don't get them.
     cards: openCards.map((card) => ({ ...view(card), lane: card.lane, about: card.about })),

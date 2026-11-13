@@ -4,7 +4,7 @@ import { credential, digest, type Environment } from "./credentials.ts";
 import { latestBefore, nextRun, parseCron } from "./cron.ts";
 import { deadlines, MINUTE, offlineCard, OFFLINE_AFTER, RUN_LEASE, SEEN_EVERY, WORKER_FRESH } from "./due.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
-import { iso, rows, type Change, type Fact, type Row, type Table, type View } from "./evolve.ts";
+import { iso, keyOf, rows, type Change, type Fact, type Row, type Table, type View } from "./evolve.ts";
 import {
   agentsOf,
   cardView,
@@ -31,6 +31,7 @@ import {
   NEED_OWNER,
   parseEvent,
   parseResult,
+  parseUsageReport,
   type Category,
   type Diagnosis,
   type Later,
@@ -847,6 +848,43 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
   channelSeen(draft, name) {
     if (justSeen(draft, draft.view.get("seen", `channel:${name}`))) return;
     put(draft, "seen", `channel:${name}`, { kind: "channel", name, seen_at: draft.at });
+  },
+  /**
+   * A worker's usage report: each day it sends replaces the whole of what it said of that day, so a lost answer makes
+   * a repeat say the same thing, never twice. Days it doesn't mention are its own and stay. Its quota snapshot the same:
+   * whole, or not at all.
+   */
+  usage(draft, worker, given) {
+    const report = parseUsageReport(given);
+    let count = 0;
+    for (const day of report.days ?? []) {
+      for (const row of rows(draft.view, "usage", { device: worker, date: day.date })) {
+        set(draft, "usage", keyOf("usage", row), null);
+      }
+      for (const row of day.rows) {
+        put(draft, "usage", `${worker}|${day.date}|${row.agent}|${row.model}|${row.source}`, {
+          device: worker,
+          date: day.date,
+          ...row,
+          at: draft.at,
+        });
+        count += 1;
+      }
+    }
+    if (report.quotas !== undefined) {
+      for (const row of rows(draft.view, "quotas", { device: worker })) {
+        set(draft, "quotas", keyOf("quotas", row), null);
+      }
+      for (const quota of report.quotas) {
+        put(draft, "quotas", `${worker}|${quota.provider}|${quota.account}|${quota.window}`, {
+          device: worker,
+          ...quota,
+          // The device's own read time when it says one; the report's arrival when it doesn't.
+          at: quota.at ?? draft.at,
+        });
+      }
+    }
+    return { days: (report.days ?? []).length, rows: count };
   },
   claimNext,
   started(draft, id, token, given) {

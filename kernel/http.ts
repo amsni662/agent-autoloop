@@ -14,6 +14,8 @@ export type Services = {
   commit: string;
   dispatch(type: string, args: any[], now: number): any;
   state(now: number, before?: number): unknown;
+  /** Usage the devices have reported plus what runs spent, aggregated for the owner. */
+  usage(now: number, options: { days?: number; device?: string }): unknown;
   /** What a pause has kept from a rule since it began and nothing has made up yet, newest first: how many, and the
    * latest of them, or all of them. */
   skipped(rule: string, since: string, everything?: boolean): { count: number; events: Row[] };
@@ -260,6 +262,20 @@ async function control(call: Call, encoded: string, action: string) {
   return json({ ...done, paused: { ...done.paused, skipped } });
 }
 
+const MAX_USAGE_DAYS = 93;
+
+function usageView(call: Call) {
+  requireKey(call, "owner");
+  const days = call.url.searchParams.get("days");
+  const count = days === null ? 7 : Number(days);
+  if (!Number.isInteger(count) || count < 1 || count > MAX_USAGE_DAYS) {
+    throw new InputError(`days 要是 1 到 ${MAX_USAGE_DAYS} 的整数`);
+  }
+  const device = call.url.searchParams.get("device");
+  if (device !== null && device.length > 200) throw new InputError("device 最多 200 字");
+  return json(call.services.usage(call.services.now(), { days: count, device: device ?? undefined }));
+}
+
 function state(call: Call) {
   requireKey(call, "owner");
   const before = call.url.searchParams.get("before");
@@ -326,6 +342,10 @@ async function route(call: Call): Promise<Response> {
   if (method === "POST" && card) return cardAction(call, Number(card[1]), card[2]);
   const ruleControl = /^\/v1\/rules\/([^/]+)\/(pause|resume|run|replay)$/.exec(path);
   if (method === "POST" && ruleControl) return control(call, ruleControl[1], ruleControl[2]);
+  if (method === "POST" && path === "/v1/usage") {
+    return json(act(call, "usage", requireKey(call, "worker"), await readJson(request)));
+  }
+  if (method === "GET" && path === "/v1/usage") return usageView(call);
   if (method === "GET" && path === "/v1/state") return state(call);
   if (method === "GET" && path === "/v1/stream") return stream(call);
   return json({ error: "没有这个地址" }, 404);

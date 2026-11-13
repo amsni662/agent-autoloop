@@ -15,6 +15,8 @@ export const TABLES = [
   "due",
   "pauses",
   "model_holds",
+  "usage",
+  "quotas",
 ] as const;
 export type Table = (typeof TABLES)[number];
 export type Change = { table: Table; key: string; row: Row | null };
@@ -42,6 +44,8 @@ const indexes: Partial<Record<Table, string[][]>> = {
   ],
   deliveries: [["channel"], ["card_id"]],
   due: [["at"]],
+  usage: [["device", "date"], ["date"]],
+  quotas: [["device"]],
 };
 const field = (name: string) => `json_extract(data,'$.${name}')`;
 const statements = new WeakMap<DatabaseSync, Map<string, StatementSync>>();
@@ -185,6 +189,8 @@ export function keyOf(table: Table, row: Row): string {
   if (table === "due") return `${row.kind}:${row.key}`;
   if (table === "pauses") return row.name;
   if (table === "model_holds") return row.model;
+  if (table === "usage") return `${row.device}|${row.date}|${row.agent}|${row.model}|${row.source}`;
+  if (table === "quotas") return `${row.device}|${row.provider}|${row.account}|${row.window}`;
   return "rules";
 }
 export function empty(db = new DatabaseSync(":memory:")) {

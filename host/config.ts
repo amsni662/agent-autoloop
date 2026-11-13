@@ -6,10 +6,26 @@ import { HOME } from "./home.ts";
 import { privateDirectory } from "./files.ts";
 
 export type ChannelConfig = { use?: string; key: string; [option: string]: unknown };
+/**
+ * What the worker meters on this machine, besides what the hub dispatched: a `gateway` is a per-request jsonl log a
+ * local proxy appends to (t/agent/model/in/out/cache_read/cache_write per line); `sessions` is a directory of agent
+ * session jsonl files counted by file offset, `agent` the name they're reported as and `use` the adapter whose
+ * worker-launched sessions are left out; `quota` is a quota snapshot file re-read when it changes.
+ */
+export type MeterSource =
+  | { kind: "gateway"; file: string }
+  | { kind: "sessions"; agent: string; use?: string; dir: string }
+  | { kind: "quota"; file: string };
 export type Config = {
   url: string;
   hub?: { listen: string; publicUrl?: string };
-  worker?: { name: string; key: string; capacity?: number; unreachable?: string[] };
+  worker?: {
+    name: string;
+    key: string;
+    capacity?: number;
+    unreachable?: string[];
+    meter?: { sources?: MeterSource[] };
+  };
   channels?: Record<string, ChannelConfig>;
   source?: { name: string; key: string };
   owner?: string;

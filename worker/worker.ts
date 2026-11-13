@@ -28,7 +28,9 @@ import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
 import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from "./agents.ts";
 import { diagnose } from "./diagnose.ts";
 import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
+import { createMeter } from "./meter.ts";
 import { loadUsage, saveUsage, usageDelta } from "./usage.ts";
+import type { MeterSource } from "../host/config.ts";
 
 const RUNS = path.join(HOME, "worker", "runs");
 const NOTHING: Usage = { input: 0, output: 0, cached: 0, cost: 0 };
@@ -71,7 +73,7 @@ type Entry = {
   why?: "cancel" | "timeout" | "finished";
   result?: Result;
 };
-export type WorkerHub = Pick<Hub, "work" | "started" | "result">;
+export type WorkerHub = Pick<Hub, "work" | "started" | "result"> & Partial<Pick<Hub, "usageReport">>;
 export type WorkerOptions = {
   hub: WorkerHub;
   name: string;
@@ -81,6 +83,8 @@ export type WorkerOptions = {
   unreachable?: string[];
   wait?: number;
   now?: () => number;
+  /** The local counters this device reports its own usage from. */
+  meter?: { sources?: MeterSource[] };
 };
 
 function save(entry: Entry) {
@@ -190,6 +194,7 @@ export function createWorker({
   unreachable,
   wait = WAIT,
   now = Date.now,
+  meter: meterConfig,
 }: WorkerOptions) {
   let claim = randomUUID();
   let unreachableSince: number | null = null;
@@ -204,6 +209,10 @@ export function createWorker({
     said.add(line);
   };
   mkdirSync(RUNS, { recursive: true, mode: 0o700 });
+  const meter =
+    meterConfig?.sources?.length && hub.usageReport
+      ? createMeter({ send: (body) => hub.usageReport!(body), sources: meterConfig.sources, log: sayOnce, now })
+      : null;
 
   const entries = () =>
     readdirSync(RUNS).flatMap((id) => {
@@ -224,6 +233,7 @@ export function createWorker({
     delete entry.stopping;
     delete entry.why;
     save(entry);
+    meter?.launched(entry.job.agent.use, entry.session);
     const { rule, agent } = entry.job;
     const cwd = rule.cwd.replace(/^~(?=[/\\])/, homedir());
     const turn: Turn = {
@@ -428,7 +438,10 @@ export function createWorker({
     const seen = read(entry, adapter, entry.finishedAt ? 0 : code);
     entry.usage = addUsage(addUsage(entry.usage, seen.usage), sessionRise(entry, seen));
     const session = seen.session ?? (entry.turn > 0 && adapter.link ? entry.session : undefined);
-    if (seen.session) entry.session = seen.session;
+    if (seen.session) {
+      if (seen.session !== entry.session) meter?.launched(entry.job.agent.use, seen.session);
+      entry.session = seen.session;
+    }
     const usage = entry.usage && { usage: entry.usage };
     const known = session && { session };
     // 分类要看的：stdout/stderr 末尾、退出码、这个回合是谁停的。
@@ -542,6 +555,7 @@ export function createWorker({
     const seen = read(entry, adapter, null);
     // Kept as soon as it's read: if the end can't be read, the one made up at launch may be nothing its CLI knows of.
     if (seen.session && seen.session !== entry.session) {
+      meter?.launched(entry.job.agent.use, seen.session);
       entry.session = seen.session;
       save(entry);
     }
@@ -636,6 +650,11 @@ export function createWorker({
     }
     await eachEntry(check);
     await eachEntry(settle);
+    try {
+      await meter?.tick();
+    } catch (error) {
+      sayOnce(`meter: ${error}`);
+    }
     const held = entries();
     let reachable = true;
     try {
