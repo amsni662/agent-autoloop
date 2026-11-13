@@ -11,6 +11,8 @@ export type Card = {
   state: "open" | "decided" | "done" | "closed";
   title: string;
   text: string;
+  /** 分类明细（设备 · Agent · 分类 · 下一步）；老卡片没有。 */
+  detail?: string | null;
   options: string[];
   recommend: number | null;
   choice: number | null;
