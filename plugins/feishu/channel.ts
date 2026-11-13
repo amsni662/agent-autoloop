@@ -91,6 +91,8 @@ export function render(card: Card) {
     },
     body: {
       elements: [
+        // 分类明细跟在「来源」的副标题后面，是正文第一行。
+        ...(card.detail ? [{ tag: "div", text: { tag: "plain_text", content: card.detail } }] : []),
         ...(card.text ? [{ tag: "markdown", content: card.text }] : []),
         ...(card.state === "open"
           ? [...(notice ? textForm : []), ...card.options.map(option), ...(notice ? [] : textForm)]

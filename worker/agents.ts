@@ -7,8 +7,10 @@ import { existsSync } from "node:fs";
 import { findOnPath } from "../host/command.ts";
 import { loadPlugin } from "../host/plugins.ts";
 import type { Usage } from "../protocol/validate.ts";
+import type { Classification } from "./diagnose.ts";
 
 export type { Usage } from "../protocol/validate.ts";
+export type { Classification } from "./diagnose.ts";
 export type Access = "read" | "edit" | "full";
 /** One launch of an agent. `resume` is the session to go on in, if any; otherwise `session` is a new id it may use. */
 export type Turn = {
@@ -49,6 +51,8 @@ export type Adapter = {
   link?(session: string): string;
   /** Whether it's installed and signed in, as `program` if its rules name one: what's wrong, in words a person can act on, or nothing. */
   check?(program?: string): string | null;
+  /** 一轮结束后按输出判断这是什么结果；认不出来返回空，交给通用规则和退出码。 */
+  classify?(stdout: string, stderr: string, code: number | null): Classification | null | undefined;
 };
 
 const adapters = new Map<string, Adapter>();

@@ -20,6 +20,7 @@ export function replay(log: Fact[]): Snapshot {
       "config",
       "due",
       "pauses",
+      "model_holds",
     ].map((t) => [t, {}]),
   ) as Snapshot["tables"];
   const next: Record<string, number> = {};

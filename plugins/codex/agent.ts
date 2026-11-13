@@ -3,8 +3,34 @@
 import { execFileSync } from "node:child_process";
 import { commandLine, powershell, psQuote } from "../../host/command.ts";
 import { findProgram, tail, type Adapter } from "../../worker/agents.ts";
+import { matchError, type ErrorRule } from "../../worker/diagnose.ts";
 
 const SANDBOX = { read: "read-only", edit: "workspace-write", full: "danger-full-access" };
+
+// 待真实样本校准：Codex turn.failed/error 事件里 message 的已知写法，真实样本来了再校准这张表。
+const RULES: ErrorRule[] = [
+  {
+    category: "quota_exhausted",
+    pattern: /insufficient[-_ ]?quota|exceeded your current quota|usage limit reached|out of credits|余额不足/i,
+    explain: "额度用尽",
+  },
+  { category: "rate_limited", pattern: /rate[-_ ]?limit|\b429\b|too many requests/i, explain: "被限流" },
+  {
+    category: "auth_invalid",
+    pattern: /\b401\b|unauthorized|token.{0,20}expired|invalid api key|authentication/i,
+    explain: "鉴权失效",
+  },
+  {
+    category: "need_login",
+    pattern: /not logged in|log ?in required|codex login|please authenticate/i,
+    explain: "需要登录",
+  },
+  {
+    category: "transient_error",
+    pattern: /stream (error|disconnected)|connection (lost|reset|refused)|\b50[234]\b|try again later/i,
+    explain: "临时网络或服务错误",
+  },
+];
 export const IN_THE_APP = [
   "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
   "/Applications/Codex.app/Contents/Resources/codex",
@@ -84,6 +110,27 @@ export default {
     if (code !== null && !completed && !reading.error) reading.error = tail(stderr) || "Codex 没有完成并留下实际结果";
     if (completed && !reading.text?.trim()) reading.error = "Codex 没有完成并留下实际结果";
     return reading;
+  },
+  classify(stdout, stderr, _code) {
+    // turn.failed 或 error 事件里的 message 是它的报错；turn.completed 之后的 error 是恢复过的，不算。
+    let failed = "";
+    let message = "";
+    for (const line of stdout.split("\n")) {
+      try {
+        const event = JSON.parse(line);
+        if (event?.type === "turn.failed") failed = event.error?.message || "";
+        else if (event?.type === "error") message = event.message || "";
+        else if (event?.type === "turn.completed") {
+          failed = "";
+          message = "";
+        }
+      } catch {}
+    }
+    const text = [failed, message, stderr].filter(Boolean).join("\n");
+    const matched = matchError(text, RULES);
+    if (matched) return matched;
+    if (failed || message) return { category: "agent_error", explain: (failed || message).split("\n")[0] };
+    return matchError(stderr) ?? null;
   },
   link: (session) => `codex://threads/${session}`,
   check(program) {

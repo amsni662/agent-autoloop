@@ -40,7 +40,8 @@ export const wordsPage = (words: string) => shell(words, `<p>${escaped(words)}</
 
 export function cardPage(card: ReturnType<typeof cardView>) {
   const from = card.rule && card.rule !== card.title ? `<p class="from">来源：${escaped(card.rule)}</p>` : "";
-  const words = `<h1>${escaped(card.title)}</h1>${from}${card.text ? `<p>${escaped(card.text)}</p>` : ""}`;
+  const detail = card.detail ? `<p class="from">${escaped(card.detail)}</p>` : "";
+  const words = `<h1>${escaped(card.title)}</h1>${from}${detail}${card.text ? `<p>${escaped(card.text)}</p>` : ""}`;
   if (card.state === "open") {
     const focused = card.recommend ?? 0;
     const button = (option: string, index: number) => {

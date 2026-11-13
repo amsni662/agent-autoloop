@@ -31,9 +31,9 @@ function words(card: Card, platform = "") {
     card.options[0] === "已处理" &&
     card.link
   )
-    return [card.title, source, card.text, `[点击处理](${card.link})`].filter(Boolean).join("\n\n");
+    return [card.title, source, card.detail, card.text, `[点击处理](${card.link})`].filter(Boolean).join("\n\n");
   const choices = card.options.map((option, index) => `${index + 1}. ${option}`).join("\n");
-  const parts = [card.title, source, card.text, ...(card.state === "open" ? [choices, card.link] : [])];
+  const parts = [card.title, source, card.detail, card.text, ...(card.state === "open" ? [choices, card.link] : [])];
   return parts.filter(Boolean).join("\n\n");
 }
 

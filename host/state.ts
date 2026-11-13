@@ -12,10 +12,10 @@ const VIEWS = {
   events: "id source key type subject summary detail link routed paused received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
-    "claimed_at seen_at finished_at manual summary error usage",
+    "claimed_at seen_at finished_at manual summary error usage diagnosis",
   run_events: "run_id event_id",
   cards:
-    "id key kind title text options recommend about state fyi quiet choice answer by result rule lane grp source " +
+    "id key kind title text detail options recommend about state fyi quiet choice answer by result rule lane grp source " +
     "agent session run_id answer_event version created_at decided_at closed_at",
   deliveries: "card_id channel version ref tries first_try_at not_before error given_up",
   timers: "id rule lane key source agent session about at event_id created_at",
@@ -23,6 +23,7 @@ const VIEWS = {
   seen: "kind name seen_at",
   keys: "kind name hash created_at",
   pauses: "name by reason since until",
+  model_holds: "model until reason by run at",
 };
 
 /** Made anew at every start, so changing them takes no rebuild and no migration. */
@@ -214,6 +215,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       notBefore: run.not_before,
       summary: run.summary ?? "",
       error: run.error ?? "",
+      diagnosis: run.diagnosis ? JSON.parse(run.diagnosis) : null,
       link: run.link ?? "",
       session: run.session,
       usage: run.usage ? JSON.parse(run.usage) : null,
@@ -221,6 +223,8 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       manual: Boolean(run.manual),
       events: all<Row>(EVENTS_OF_RUN, [run.id]),
     })),
+    // 限流、额度用尽的模型和它的恢复时刻：阶段 3 的改派从这里读。
+    modelHolds: all<Row>("SELECT model, until, reason, by, run, at FROM model_holds"),
     hasMore,
     nextBefore: hasMore ? page[PAGE - 1].id : null,
     unrouted: unrouted(),

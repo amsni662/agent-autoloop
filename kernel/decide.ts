@@ -26,8 +26,13 @@ import {
   ANSWER_REF,
   ANSWER_TEXT,
   DELIVERY_REF,
+  HOLD_MODEL,
+  LABELS,
+  NEED_OWNER,
   parseEvent,
   parseResult,
+  type Category,
+  type Diagnosis,
   type Later,
   type Rejected,
   type Result,
@@ -52,11 +57,11 @@ const DEFAULTS: Partial<Record<Table, Row>> = {
   runs: {
     attempts: 0,
     ...nulls("claim", "issued", "last_issued", "last_result", "last_answer", "cancel_at", "resume", "session", "link"),
-    ...nulls("claimed_at", "seen_at", "finished_at", "summary", "error", "usage"),
+    ...nulls("claimed_at", "seen_at", "finished_at", "summary", "error", "usage", "diagnosis"),
   },
   cards: {
     ...CARD_BASICS,
-    ...nulls("choice", "answer", "by", "result", "rule"),
+    ...nulls("choice", "answer", "by", "result", "rule", "detail"),
     lane: "",
     ...nulls("grp", "source", "agent", "session", "run_id", "answer_event"),
     version: 1,
@@ -116,6 +121,44 @@ function assignQueued(draft: Draft, run: Row) {
   put(draft, "runs", run.id, { agent: rule.to, rules_version: config.version, ...session });
 }
 const threadOf = (run: Row) => ({ rule: run.rule, lane: run.lane, grp: run.grp });
+
+const timeOf = (draft: Draft, at: string) =>
+  new Intl.DateTimeFormat("zh-CN", {
+    timeZone: draft.rules.timezone,
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(Date.parse(at));
+
+/** 分类明细行，追加在通知「来源」那行的位置：设备 · Agent（模型）· 分类 · 下一步。 */
+function diagnosisDetail(draft: Draft, diagnosis: Diagnosis): string {
+  const agent = diagnosis.model ? `${diagnosis.agent ?? "?"}（${diagnosis.model}）` : (diagnosis.agent ?? "?");
+  const parts = [`设备 ${diagnosis.device ?? "?"}`, `Agent ${agent}`, `分类：${LABELS[diagnosis.category]}`];
+  const next = (
+    {
+      need_owner: "需要本人处理",
+      retry: "会自动重试",
+      rerouted: "已改派",
+      wait_until: diagnosis.waitUntil ? `等到 ${timeOf(draft, diagnosis.waitUntil)} 再启用` : "等到恢复再启用",
+    } as Partial<Record<NonNullable<Diagnosis["next"]>, string>>
+  )[diagnosis.next ?? "none"];
+  parts.push(`下一步：${next ?? "没有后续"}`);
+  return parts.join(" · ").slice(0, 500);
+}
+
+/** 中枢自己判的分类没有设备给的 diagnosis：detail 只标分类和下一步。 */
+const hubDetail = (category: Category, device: string | null, next: string) =>
+  `${device ? `设备 ${device} · ` : ""}分类：${LABELS[category]} · 下一步：${next}`;
+
+/** 结局本身能定的分类：老回执没带 diagnosis 时中枢按结局补；failed 没有证据不猜。 */
+const outcomeCategory = (outcome: Result["outcome"]): Category | undefined =>
+  (
+    ({ done: "completed", nothing: "nothing_to_do", cancelled: "owner_stopped" }) as Partial<
+      Record<Result["outcome"], Category>
+    >
+  )[outcome];
 
 /** The session a round about to start goes on in. With resume, one that has none takes its thread's last, unless that round was
  * stopped: what stopped it, or the owner's reason, would meet this one too. Rounds on a thread can share a session, so another
@@ -284,7 +327,10 @@ function sweep(draft: Draft) {
         put(draft, "runs", run.id, { state: "unknown" });
         const agent = configuration(draft.view, run.rules_version).agents[run.agent].name;
         const words = `交给 ${agent} 后超过 5 分钟没有回音，不确定做没做完；后续新任务照常处理。`;
-        notify(draft, `run:${run.id}:unknown`, run.rule, words, threadOf(run));
+        notify(draft, `run:${run.id}:unknown`, run.rule, words, {
+          ...threadOf(run),
+          detail: hubDetail("no_report", worker, "结果照收，处理照常"),
+        });
       }
     }
     const waiting = waitingOn(draft.view, worker, now);
@@ -298,7 +344,9 @@ function sweep(draft: Draft) {
       ? `${worker} 一直没连上中台，有 ${waiting.length} 件任务等了 ${minutes} 分钟没人接`
       : `${worker} 已经 ${minutes} 分钟没连上中台，有 ${waiting.length} 件任务在排队或在跑`;
     const check = neverSeen ? "有没有开机联网" : "是不是关机、休眠或断网了";
-    notify(draft, key, "接单程序没连上", `${situation}（请看一眼那台电脑${check}）。`);
+    notify(draft, key, "接单程序没连上", `${situation}（请看一眼那台电脑${check}）。`, {
+      detail: hubDetail("worker_offline", worker, "检查设备；连上后自动接单"),
+    });
   }
 }
 
@@ -337,10 +385,10 @@ function claimNext(draft: Draft, worker: string, claim: string) {
 }
 
 /** Ends a run nothing will pick up again, and says so. */
-function stopRun(draft: Draft, run: Row, why: string, summary: string, words: string) {
+function stopRun(draft: Draft, run: Row, why: string, summary: string, words: string, detail?: string) {
   put(draft, "runs", run.id, { state: "cancelled", finished_at: draft.at, summary });
   closeStopped(draft, run.id, summary);
-  notify(draft, `run:${run.id}:${why}`, run.rule, words, threadOf(run));
+  notify(draft, `run:${run.id}:${why}`, run.rule, words, { ...threadOf(run), ...(detail && { detail }) });
 }
 
 const ruleGone = (run: Row): [string, string] => [
@@ -363,7 +411,49 @@ function retryLater(draft: Draft, run: Row, result: Result) {
   const failure = { attempts, error, ...unclaimed };
   if (!ruleNamed(draft, run.rule)) {
     put(draft, "runs", id, failure);
-    stopRun(draft, run, "rule-gone", ...ruleGone(run));
+    stopRun(draft, run, "rule-gone", ...ruleGone(run), hubDetail("rule_deleted", null, "没有后续"));
+    return rejected;
+  }
+  const diagnosis = result.diagnosis;
+  // 限流和额度：照常重试，另外把模型记下来，阶段 3 的改派从这里读。
+  if (diagnosis && HOLD_MODEL.has(diagnosis.category)) {
+    const configured = configuration(draft.view, run.rules_version).agents[run.agent];
+    const model = diagnosis.model ?? configured?.model;
+    if (model) {
+      put(draft, "model_holds", model, {
+        model,
+        until: diagnosis.waitUntil ?? null,
+        reason: diagnosis.category,
+        by: "receipt",
+        run: id,
+        at: draft.at,
+      });
+    }
+  }
+  // 要人处理：不再自动重试，这一轮按没跑成记，并开一张提问卡片等本人。
+  if (diagnosis && NEED_OWNER.has(diagnosis.category)) {
+    const summary = `要本人处理：${diagnosis.explain ?? LABELS[diagnosis.category]}`.slice(0, 500);
+    put(draft, "runs", id, { ...failure, state: "cancelled", finished_at: draft.at, summary });
+    closeStopped(draft, id, "要本人处理");
+    const detail = diagnosisDetail(draft, diagnosis);
+    const lines = [diagnosis.explain ?? error, detail];
+    if (diagnosis.raw) lines.push(`原文：${diagnosis.raw.slice(-300)}`);
+    if (diagnosis.output) lines.push(`原始输出：${diagnosis.output}`);
+    createCard(draft, {
+      key: `run:${id}:need-owner`,
+      kind: "ask",
+      title: `「${run.rule}」要本人处理`,
+      text: lines.join("\n"),
+      options: ["已恢复，重新派一轮", "先不做了"],
+      recommend: 0,
+      about: "本人处理好了就接着做这件事；选了「先不做了」就回没事可做，别再做。",
+      detail,
+      ...threadOf(run),
+      source: sourceOf(draft.view, id),
+      agent: run.agent,
+      session: draft.view.get("runs", id)!.session,
+      run: id,
+    });
     return rejected;
   }
   if (attempts >= MAX_ATTEMPTS) {
@@ -371,7 +461,7 @@ function retryLater(draft: Draft, run: Row, result: Result) {
     const summary = `连续 ${MAX_ATTEMPTS} 次没跑成，不再自动重试`;
     const words = `连续 ${MAX_ATTEMPTS} 次自动处理没跑完（卡在：${error}），不再自动重试。解决后重新触发这件事，它会从头开始。`;
     put(draft, "runs", id, failure);
-    stopRun(draft, run, "stopped", summary, words);
+    stopRun(draft, run, "stopped", summary, words, hubDetail("max_failures", null, "解决后重新触发这件事"));
     return rejected;
   }
   put(draft, "runs", id, { state: "queued", not_before: iso(notBefore), ...failure });
@@ -388,7 +478,10 @@ function retryLater(draft: Draft, run: Row, result: Result) {
     const clock = { timeZone: draft.rules.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" } as const;
     const time = new Intl.DateTimeFormat("zh-CN", clock).format(notBefore);
     const words = `连续 3 次自动处理没跑完（卡在：${error}），${time} 会自动再试。`;
-    notify(draft, `run:${id}:failing`, run.rule, words, threadOf(run));
+    notify(draft, `run:${id}:failing`, run.rule, words, {
+      ...threadOf(run),
+      ...(diagnosis && { detail: diagnosisDetail(draft, diagnosis) }),
+    });
   }
   assignQueued(draft, draft.view.get("runs", id)!);
   return rejected;
@@ -462,11 +555,23 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
   }
   const run = heldRun(draft, id, token, ["claimed", "unknown"]);
   const result = parseResult(given);
+  // 老回执没有 diagnosis：结局明确的由中枢补上分类，failed 没有证据不猜，行为和旧版一致。
+  if (!result.diagnosis) {
+    const category = outcomeCategory(result.outcome);
+    if (category) result.diagnosis = { category, next: "none" };
+  }
   const session = result.session ?? run.session;
   const usage = result.usage
     ? JSON.stringify(addUsage(run.usage ? JSON.parse(run.usage) : undefined, result.usage))
     : run.usage;
-  put(draft, "runs", id, { last_issued: run.issued, last_result: hash, issued: null, session, usage });
+  put(draft, "runs", id, {
+    last_issued: run.issued,
+    last_result: hash,
+    issued: null,
+    session,
+    usage,
+    diagnosis: result.diagnosis ? JSON.stringify(result.diagnosis) : run.diagnosis,
+  });
   let rejected: Rejected[] = [];
   // Told to stop, one that failed first has stopped all the same: trying again would start what the owner ended.
   if (result.outcome === "cancelled" || (result.outcome === "failed" && run.cancel_at)) {
@@ -694,7 +799,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     put(draft, "config", "rules", { value: rules, version: draft.seq });
     for (const run of rows(draft.view, "runs", { state: "queued" })) {
       if (ruleOf(rules, run.rule)) assignQueued(draft, run);
-      else stopRun(draft, run, "rule-gone", ...ruleGone(run));
+      else stopRun(draft, run, "rule-gone", ...ruleGone(run), hubDetail("rule_deleted", null, "没有后续"));
     }
     closeOpen(draft, (key) => key.startsWith("rules:"), "改好了");
   },
