@@ -101,6 +101,7 @@ async function serveBucket(): Promise<{ cfg: S3Config; objects: Map<string, Buff
       endpoint: `http://127.0.0.1:${port}`,
       region: "auto",
       bucket: "grok-bot-files",
+      prefix: "",
       ...KEY,
     },
     objects,

@@ -9,6 +9,7 @@ export type S3Config = {
   bucket: string;
   accessKeyId: string;
   secretAccessKey: string;
+  prefix: string;
 };
 
 export class S3Error extends Error {
@@ -26,12 +27,16 @@ export function s3FromEnv(env: NodeJS.ProcessEnv = process.env): S3Config {
   if (missing.length) {
     throw new S3Error(0, `缺环境变量 ${missing.join("、")}：把私密桶凭据写进 secrets.env 或环境，不要写进文件`);
   }
+  // A shared bucket can keep this deployment's objects under one namespace: "ai-loop/" turns keys into
+  // "ai-loop/archive/<project>/…". Stripped of slashes at both ends, then given one trailing slash.
+  const prefix = (env.ARCHIVE_S3_PREFIX ?? "").replace(/^\/+|\/+$/g, "");
   return {
     endpoint: env.ARCHIVE_S3_ENDPOINT!.replace(/\/+$/, ""),
     region: env.ARCHIVE_S3_REGION || "auto",
     bucket: env.ARCHIVE_S3_BUCKET || "grok-bot-files",
     accessKeyId: env.ARCHIVE_S3_ACCESS_KEY_ID!,
     secretAccessKey: env.ARCHIVE_S3_SECRET_ACCESS_KEY!,
+    prefix: prefix ? `${prefix}/` : "",
   };
 }
 

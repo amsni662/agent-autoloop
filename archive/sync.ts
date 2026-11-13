@@ -20,7 +20,7 @@ function walk(dir: string): string[] {
   return found.sort();
 }
 
-const prefixOf = (project: string) => `archive/${project}/`;
+const prefixOf = (project: string, cfg: S3Config) => `${cfg.prefix}archive/${project}/`;
 
 export type SyncResult = { project: string; sent: number; removed: number; skipped: number };
 
@@ -31,7 +31,7 @@ export async function pushArchive(
   const cfg = options.s3 ?? s3FromEnv();
   const dir = archiveDir(project, options.root);
   if (!existsSync(path.join(dir, FILES.meta))) throw new Error(`项目「${project}」没有档案：${dir}`);
-  const prefix = prefixOf(project);
+  const prefix = prefixOf(project, cfg);
   const remote = new Map((await listObjects(cfg, prefix)).map((item) => [item.key, item.etag]));
   const files = walk(dir);
   let sent = 0,
@@ -72,7 +72,7 @@ export async function pullArchive(
   options: { s3?: S3Config } = {},
 ): Promise<{ project: string; version: number; files: number }> {
   const cfg = options.s3 ?? s3FromEnv();
-  const prefix = prefixOf(project);
+  const prefix = prefixOf(project, cfg);
   const objects = await listObjects(cfg, prefix);
   if (!objects.length) throw new Error(`桶里没有项目「${project}」的档案（${prefix}）`);
   const dir = path.join(to, project);
