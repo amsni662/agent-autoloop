@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai-loop-wechat-clawbot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/spider/.local/node/bin/node</string>
+    <string>--disable-warning=ExperimentalWarning</string>
+    <string>/Users/spider/.agent-autoloop/app/adapters/wechat-clawbot/main.ts</string>
+    <string>/Users/spider/mini-hub/ai-loop/secrets/wechat-clawbot.config.json</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/spider/.local/node/bin:/Users/spider/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/spider/Library/Logs/ai-loop-wechat-clawbot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/spider/Library/Logs/ai-loop-wechat-clawbot.log</string>
+</dict>
+</plist>

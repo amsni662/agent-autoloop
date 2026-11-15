@@ -1,0 +1,98 @@
+{
+  "timezone": "Asia/Shanghai",
+  "sources": {
+    "wechat": { "name": "微信 ClawBot" },
+    "feishu": { "name": "飞书 AI Loop 机器人" }
+  },
+  "agents": {
+    "dev-mini": { "name": "Mini 开发", "worker": "office-mini", "use": "command", "command": ["echo", "done"] },
+    "ops-mini": { "name": "Mini 指令", "worker": "office-mini", "use": "command", "command": ["echo", "done"] }
+  },
+  "channels": {
+    "wechat": { "name": "微信 ClawBot", "answerers": ["me@im.wechat"] },
+    "feishu": { "name": "飞书", "answerers": ["ou_me"] }
+  },
+  "projects": {
+    "ai-loop": { "name": "AI Loop", "cwd": "~/" },
+    "mba": { "name": "MBA", "cwd": "~/" }
+  },
+  "defaultChannels": ["wechat"],
+  "rules": [
+    {
+      "name": "微信 AI Loop 任务",
+      "when": { "source": "wechat", "types": ["task.ai-loop"] },
+      "to": "dev-mini",
+      "cwd": "~/",
+      "project": "ai-loop",
+      "channels": ["wechat"],
+      "tell": "always"
+    },
+    {
+      "name": "微信 MBA 任务",
+      "when": { "source": "wechat", "types": ["task.mba"] },
+      "to": "dev-mini",
+      "cwd": "~/",
+      "project": "mba",
+      "channels": ["wechat"],
+      "tell": "always"
+    },
+    {
+      "name": "飞书 AI Loop 任务",
+      "when": { "source": "feishu", "types": ["task.ai-loop"] },
+      "to": "dev-mini",
+      "cwd": "~/",
+      "project": "ai-loop",
+      "channels": ["feishu"],
+      "tell": "always"
+    },
+    {
+      "name": "飞书 MBA 任务",
+      "when": { "source": "feishu", "types": ["task.mba"] },
+      "to": "dev-mini",
+      "cwd": "~/",
+      "project": "mba",
+      "channels": ["feishu"],
+      "tell": "always"
+    },
+    {
+      "name": "微信状态",
+      "when": { "source": "wechat", "types": ["ops.status"] },
+      "to": "ops-mini",
+      "cwd": "~/",
+      "channels": ["wechat"],
+      "tell": "always"
+    },
+    {
+      "name": "飞书状态",
+      "when": { "source": "feishu", "types": ["ops.status"] },
+      "to": "ops-mini",
+      "cwd": "~/",
+      "channels": ["feishu"],
+      "tell": "always"
+    },
+    {
+      "name": "微信用量",
+      "when": { "source": "wechat", "types": ["ops.usage"] },
+      "to": "ops-mini",
+      "cwd": "~/",
+      "channels": ["wechat"],
+      "tell": "always"
+    },
+    {
+      "name": "微信查版本",
+      "when": { "source": "wechat", "types": ["ai-loop.check-version"] },
+      "to": "ops-mini",
+      "cwd": "~/",
+      "channels": ["wechat"],
+      "tell": "always"
+    },
+    {
+      "name": "飞书盘点 Mini",
+      "when": { "source": "feishu", "types": ["ai-loop.inventory.office-mini"] },
+      "to": "ops-mini",
+      "cwd": "~/",
+      "channels": ["feishu"],
+      "tell": "always"
+    }
+  ]
+}
