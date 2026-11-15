@@ -5,6 +5,8 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { HOME, RULES_FILE } from "./home.ts";
+import { CATALOG_DIR, loadCatalog } from "./catalog.ts";
+import type { Catalog } from "../kernel/rules.ts";
 import { privateDirectory } from "./files.ts";
 import { skippedOf, stateOf as state, usageOf, viewStatements } from "./state.ts";
 import { cardHash, digest, whose as keyHolder } from "../kernel/credentials.ts";
@@ -127,12 +129,32 @@ const initial = reloadRules();
 if (!rules) throw new Error(initial.problem ?? "缺少规则");
 
 let toldOf: string | undefined;
+let catalogToldOf: string | undefined;
+
+export function reloadCatalog(dir = CATALOG_DIR): { problem?: string } {
+  const { catalog, problem } = loadCatalog(dir);
+  // 没有清单不是错：规则照旧按 Agent 派，什么也不说。
+  if (problem) return { problem };
+  if (!catalog) return {};
+  const current = getView().get("config", "catalog")?.value as Catalog | undefined;
+  const differs =
+    !current || current.version !== catalog.version || JSON.stringify(current.roles) !== JSON.stringify(catalog.roles);
+  if (differs) execute("catalog", [catalog]);
+  return {};
+}
+
+const catalogInitial = reloadCatalog();
+// 没有清单不算坏：规则照旧按 Agent 派；有了却读不了才是问题，启动时就告诉本人。
+if (catalogInitial.problem) execute("catalogError", [catalogInitial.problem]);
 
 export function tick(now = Date.now()) {
   const { problem } = reloadRules();
   // A file still gone or still wrong is a problem at every tick, and an owner who closed the card has heard.
   if (problem && problem !== toldOf) execute("rulesError", [problem], now);
   toldOf = problem;
+  const catalogProblem = reloadCatalog().problem;
+  if (catalogProblem && catalogProblem !== catalogToldOf) execute("catalogError", [catalogProblem], now);
+  catalogToldOf = catalogProblem;
   execute("tick", [], now);
 }
 

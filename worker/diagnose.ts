@@ -3,6 +3,7 @@
 import type { Adapter } from "./agents.ts";
 import type { Category, Diagnosis, Result } from "../protocol/validate.ts";
 import { nextOf } from "../protocol/validate.ts";
+import { redact } from "../protocol/redact.ts";
 
 /** 插件 classify 的返回：认出的分类；认不出来返回空，交给通用规则和退出码。 */
 export type Classification = { category: Category; explain?: string; waitUntil?: string };
@@ -95,7 +96,11 @@ export type DiagnoseInput = {
   now?: () => number;
 };
 
-const clip = (text: string | undefined, length: number) => (text ?? "").trim().slice(-length) || undefined;
+// 原文一律先脱敏再留：stderr 和报错里可能带着令牌、私钥、授权头。
+const clip = (text: string | undefined, length: number) => {
+  const cut = (text ?? "").trim().slice(-length);
+  return cut ? redact(cut) : undefined;
+};
 
 /** 一轮结束后生成 diagnosis。顺序：结局 > 作废 > 被停 > 插件 > 通用规则 > 退出码 > 兜底。 */
 export function diagnose(input: DiagnoseInput): Diagnosis {
@@ -108,7 +113,7 @@ export function diagnose(input: DiagnoseInput): Diagnosis {
   };
   const make = (category: Category, explain?: string, waitUntil?: string, raw?: string): Diagnosis => ({
     category,
-    ...(explain && { explain: explain.slice(0, 500) }),
+    ...(explain && { explain: redact(explain.slice(0, 500)) }),
     ...base,
     next: nextOf(category, waitUntil),
     ...(waitUntil && { waitUntil }),
@@ -128,8 +133,10 @@ export function diagnose(input: DiagnoseInput): Diagnosis {
   if (input.outcome === "done") return make("completed");
   if (input.outcome === "nothing") return make("nothing_to_do");
   if (input.outcome === "cancelled") return make("owner_stopped");
-  if (input.why === "timeout") return make("timeout", input.error);
-  if (input.why === "finished") return make("stalled", input.error);
+  // 超时也带原文：卡在哪一步、最后说了什么，本人要能看到。
+  if (input.why === "timeout") return make("timeout", input.error, undefined, clip(input.stderr || input.stdout, 4000));
+  if (input.why === "finished")
+    return make("stalled", input.error, undefined, clip(input.stderr || input.stdout, 4000));
   const text = `${input.error ?? ""}\n${input.stderr ?? ""}\n${input.stdout ?? ""}`;
   const raw = () => clip(input.stderr || input.stdout || input.error, 4000);
   const waitUntil = () => {

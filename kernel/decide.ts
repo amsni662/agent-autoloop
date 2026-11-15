@@ -19,7 +19,18 @@ import {
   workerOf,
   workers,
 } from "./query.ts";
-import { cronOf, eventRule, ruleOf, SCHEDULE, typeMatches, type Rule, type Rules } from "./rules.ts";
+import {
+  cronOf,
+  eventRule,
+  ROLE_PREFIX,
+  ruleOf,
+  SCHEDULE,
+  typeMatches,
+  type Catalog,
+  type Rule,
+  type Rules,
+} from "./rules.ts";
+import { redact } from "../protocol/redact.ts";
 import {
   addUsage,
   ANSWER_BY,
@@ -116,12 +127,23 @@ function add(draft: Draft, table: Table, fields: Row) {
 }
 
 const ruleNamed = (draft: Draft, name: string) => ruleOf(draft.rules, name);
-function assignQueued(draft: Draft, run: Row) {
+/** The agent a queued run last resolved to: a role run's stored pick, a fixed rule's own agent. */
+const resolvedOf = (run: Row): string => {
+  try {
+    const resolved = run.resolved ? JSON.parse(run.resolved) : undefined;
+    return resolved?.picked ?? run.agent;
+  } catch {
+    return run.agent;
+  }
+};
+function assignQueued(draft: Draft, run: Row, agent?: string) {
   const config = draft.view.get("config", "rules")!;
   const rule = ruleOf(config.value as Rules, run.rule);
   if (!rule) return;
-  const session = rule.to === run.agent ? {} : nulls("session", "resume");
-  put(draft, "runs", run.id, { agent: rule.to, rules_version: config.version, ...session });
+  const to = agent ?? rule.to;
+  // A role run back in the queue keeps its session for the next pick to maybe reuse; a concrete change drops it.
+  const session = to.startsWith(ROLE_PREFIX) || to === resolvedOf(run) ? {} : nulls("session", "resume");
+  put(draft, "runs", run.id, { agent: to, rules_version: config.version, ...session });
 }
 const threadOf = (run: Row) => ({ rule: run.rule, lane: run.lane, grp: run.grp });
 
@@ -135,10 +157,10 @@ const timeOf = (draft: Draft, at: string) =>
     hourCycle: "h23",
   }).format(Date.parse(at));
 
-/** 分类明细行，追加在通知「来源」那行的位置：设备 · Agent（模型）· 分类 · 下一步。 */
+/** 分类明细行，追加在通知「来源」那行的位置：设备 · Agent（模型）· 分类 · 下一步。不知道的写「未知」。 */
 function diagnosisDetail(draft: Draft, diagnosis: Diagnosis): string {
-  const agent = diagnosis.model ? `${diagnosis.agent ?? "?"}（${diagnosis.model}）` : (diagnosis.agent ?? "?");
-  const parts = [`设备 ${diagnosis.device ?? "?"}`, `Agent ${agent}`, `分类：${LABELS[diagnosis.category]}`];
+  const agent = `${diagnosis.agent ?? "未知"}（${diagnosis.model ?? "未知"}）`;
+  const parts = [`设备 ${diagnosis.device ?? "未知"}`, `Agent ${agent}`, `分类：${LABELS[diagnosis.category]}`];
   const next = (
     {
       need_owner: "需要本人处理",
@@ -151,9 +173,10 @@ function diagnosisDetail(draft: Draft, diagnosis: Diagnosis): string {
   return parts.join(" · ").slice(0, 500);
 }
 
-/** 中枢自己判的分类没有设备给的 diagnosis：detail 只标分类和下一步。 */
-const hubDetail = (category: Category, device: string | null, next: string) =>
-  `${device ? `设备 ${device} · ` : ""}分类：${LABELS[category]} · 下一步：${next}`;
+/** 中枢自己判的分类用同一套明细格式：设备（中枢的事写「中枢」）· Agent（模型）· 分类 · 下一步。 */
+const hubDetail = (category: Category, device: string | null, next: string, agent?: string, model?: string) =>
+  `${device ? `设备 ${device}` : "设备 中枢"} · ${agent ? `Agent ${agent}（${model ?? "未知"}） · ` : ""}` +
+  `分类：${LABELS[category]} · 下一步：${next}`;
 
 /** 结局本身能定的分类：老回执没带 diagnosis 时中枢按结局补；failed 没有证据不猜。 */
 const outcomeCategory = (outcome: Result["outcome"]): Category | undefined =>
@@ -173,7 +196,7 @@ function settleSession(draft: Draft, run: Row) {
   let session = carried;
   if (!session && rule?.resume) {
     const [last] = rows(draft.view, "runs", { ...thread, state: ["done", "nothing", "cancelled"] }, 1, true);
-    if (last?.state !== "cancelled" && last?.agent === rule.to) session = last.session;
+    if (last?.state !== "cancelled" && last?.agent === run.agent) session = last.session;
   }
   if (!session) return;
   const going = rows(draft.view, "runs", { ...thread, state: ["claimed", "unknown"] });
@@ -413,10 +436,99 @@ function noteArchive(draft: Draft, run: Row, result: Result, hash: string) {
       `第 ${run.id} 轮做完了，但回执没带档案写回（archive 段）：这一轮已标成未完成。`,
       {
         ...threadOf(run),
-        detail: hubDetail("receipt_unreadable", workerOf(draft.view, run) ?? null, "下一轮的回执带上 archive 段"),
+        detail: hubDetail(
+          "receipt_unreadable",
+          workerOf(draft.view, run) ?? null,
+          "下一轮的回执带上 archive 段",
+          agent?.name,
+          agent?.model,
+        ),
       },
     );
   }
+}
+
+/** A hold without a reset time keeps the model out for this long before it gets probed again. */
+const HOLD_PROBE = 30 * MINUTE;
+
+type Skipped = { candidate: string; reason: string; until?: number };
+type Resolution = { picked?: string; role?: string; skipped: Skipped[] };
+
+/** The hold expiry when the model is being held now, else null. A hold without a reset gets a probe window. */
+function heldUntil(view: View, model: string | undefined, now: number): number | null {
+  if (!model) return null;
+  const hold = view.get("model_holds", model);
+  if (!hold) return null;
+  const until = hold.until === null ? Date.parse(hold.at) + HOLD_PROBE : Date.parse(hold.until);
+  return until > now ? until : null;
+}
+
+/** A worker that has checked in lately counts as online; the worker asking right now counts too. */
+function onlineNow(draft: Draft, worker: string, claiming?: string) {
+  if (worker === claiming) return true;
+  const seen = draft.view.get("seen", `worker:${worker}`);
+  return seen !== undefined && draft.now - Date.parse(seen.seen_at) <= WORKER_FRESH;
+}
+
+const catalogRoles = (draft: Draft): Catalog["roles"] =>
+  (draft.view.get("config", "catalog")?.value as Catalog | undefined)?.roles ?? {};
+
+/**
+ * The role chain walked top to bottom: the first candidate whose agent is registered, whose worker is online, whose
+ * model isn't held and who has a free slot. `skipped` says why each earlier one wasn't taken; no picked means the
+ * whole chain is unusable right now. Fixed rules are a chain of one.
+ */
+function resolve(draft: Draft, rule: Rule, claiming: string | undefined, claimed: Row[]): Resolution {
+  const role = rule.to.startsWith(ROLE_PREFIX) ? rule.to.slice(ROLE_PREFIX.length) : undefined;
+  const chain: { agent: string }[] = role ? (catalogRoles(draft)[role] ?? []) : [{ agent: rule.to }];
+  const skipped: Skipped[] = [];
+  for (const candidate of chain) {
+    const id = candidate.agent;
+    const agent = draft.rules.agents[id];
+    if (!agent) {
+      skipped.push({ candidate: id, reason: "中枢里没登记" });
+      continue;
+    }
+    if (!onlineNow(draft, agent.worker, claiming)) {
+      skipped.push({ candidate: id, reason: `${agent.worker} 不在线` });
+      continue;
+    }
+    const until = heldUntil(draft.view, agent.model, draft.now);
+    if (until !== null) {
+      skipped.push({ candidate: id, reason: `模型 ${agent.model} 暂停到 ${iso(until)}`, until });
+      continue;
+    }
+    if (agent.maxActive !== undefined && claimed.filter((run) => run.agent === id).length >= agent.maxActive) {
+      skipped.push({ candidate: id, reason: "没空位" });
+      continue;
+    }
+    return { picked: id, role, skipped };
+  }
+  return { role, skipped };
+}
+
+/** The earliest moment a skipped candidate recovers, when any hold says one. */
+const probeAt = (skipped: Skipped[]) => {
+  const untils = skipped.flatMap((skip) => (skip.until ? [skip.until] : []));
+  return untils.length ? Math.min(...untils) : null;
+};
+
+/** The whole chain unusable: the owner hears once, with each skipped candidate's reason. */
+function notifyBlocked(draft: Draft, run: Row, skipped: Skipped[], resume: number | null) {
+  const reasons = skipped.map((skip) => `${skip.candidate}：${skip.reason}`).join("；") || "没有候选";
+  const when = resume !== null ? `，${timeOf(draft, iso(resume))} 会自动再试` : "，候选恢复后会自动派发";
+  notify(draft, `run:${run.id}:no-candidate`, run.rule, `「${run.rule}」现在没有能用的候选（${reasons}）${when}。`, {
+    ...threadOf(run),
+    detail: hubDetail("no_candidate", null, "候选恢复后自动派发"),
+  });
+}
+
+/** A queued run whose whole chain is unusable: pushed to the earliest recovery, and the owner told once. */
+function markBlocked(draft: Draft, run: Row, skipped: Skipped[]) {
+  const resume = probeAt(skipped);
+  // Same rule as a failed run whose chain is out: try again when the first candidate can come back.
+  if (resume !== null) put(draft, "runs", run.id, { not_before: iso(resume) });
+  notifyBlocked(draft, run, skipped, resume);
 }
 
 function claimNext(draft: Draft, worker: string, claim: string, snapshot?: Row) {
@@ -442,30 +554,50 @@ function claimNext(draft: Draft, worker: string, claim: string, snapshot?: Row) 
       }
     }
   }
-  const agents = agentsOf(draft.view, worker);
   const runs = rows(draft.view, "runs", { state: ["queued", "claimed"] });
   const claimed = runs.filter((run) => run.state === "claimed");
   const groupLimit = (group: string) => draft.rules.rules.find((rule) => rule.group === group)?.parallel ?? 1;
+  // The candidate a queued run lands on: fixed rules keep their one agent, role rules walk the catalog chain.
+  const picked: { current?: Resolution } = {};
+  const blocked: { run: Row; skipped: Skipped[] }[] = [];
   const claimable = (run: Row) => {
     if (run.state !== "queued") return false;
     const rule = ruleNamed(draft, run.rule);
     // What was queued before a pause, or an answer that came in during one, waits for the resume.
-    if (!rule || !agents.includes(rule.to) || pauseOf(draft.view, rule, draft.now)) return false;
-    const agentLimit = draft.rules.agents[rule.to].maxActive;
-    return (
+    if (!rule || pauseOf(draft.view, rule, draft.now)) return false;
+    const found = resolve(draft, rule, worker, claimed);
+    if (!found.picked) {
+      // Only runs due now can be "blocked": later ones haven't had their go yet. Fixed rules wait quietly —
+      // the worker-offline sweep already tells the owner once; only a role chain reports no-candidate.
+      if (found.role && Date.parse(run.not_before) <= draft.now) blocked.push({ run, skipped: found.skipped });
+      return false;
+    }
+    // A usable candidate on another worker is that worker's to claim whenever it next polls.
+    if (draft.rules.agents[found.picked].worker !== worker) return false;
+    const agentLimit = draft.rules.agents[found.picked].maxActive;
+    const ok =
       Date.parse(run.not_before) <= draft.now &&
       !claimed.some((other) => other.grp === run.grp && other.lane === run.lane) &&
       claimed.filter((other) => other.grp === run.grp).length < groupLimit(run.grp) &&
       (rule.maxActive === undefined || claimed.filter((other) => other.rule === run.rule).length < rule.maxActive) &&
-      (agentLimit === undefined || claimed.filter((other) => other.agent === rule.to).length < agentLimit)
-    );
+      (agentLimit === undefined || claimed.filter((other) => other.agent === found.picked).length < agentLimit);
+    if (ok) picked.current = found;
+    return ok;
   };
   // The same claim again means the answer got lost: it gets back the run it already has.
   const held = claimed.find((run) => run.claim === claim && workerOf(draft.view, run) === worker);
   const run = held ?? runs.find(claimable);
+  for (const stuck of blocked) markBlocked(draft, stuck.run, stuck.skipped);
   if (!run) return null;
   if (!held) {
-    assignQueued(draft, run);
+    assignQueued(draft, run, picked.current?.picked);
+    if (picked.current?.role) {
+      const skipped = picked.current.skipped.map(({ candidate, reason }) => ({ candidate, reason }));
+      put(draft, "runs", run.id, {
+        resolved: JSON.stringify({ role: picked.current.role, picked: picked.current.picked, skipped }),
+      });
+      closeOpen(draft, (key) => key === `run:${run.id}:no-candidate`, "已有能用的候选");
+    }
     settleSession(draft, draft.view.get("runs", run.id)!);
   }
   const since = held ? { claimed_at: run.claimed_at, link: run.link } : { claimed_at: draft.at, link: null };
@@ -491,7 +623,7 @@ const ruleGone = (run: Row): [string, string] => [
 function retryLater(draft: Draft, run: Row, result: Result) {
   const { id } = run;
   const attempts = run.attempts + 1;
-  const notBefore = draft.now + Math.min(5 * MINUTE * 2 ** (attempts - 1), 60 * MINUTE);
+  let notBefore = draft.now + Math.min(5 * MINUTE * 2 ** (attempts - 1), 60 * MINUTE);
   const error = (result.error ?? "").trim().replace(/[。.]+$/, "") || "没说原因";
   const unclaimed = nulls("claim", "claimed_at", "seen_at", "cancel_at");
   const rejected: Rejected[] = [];
@@ -506,7 +638,7 @@ function retryLater(draft: Draft, run: Row, result: Result) {
     return rejected;
   }
   const diagnosis = result.diagnosis;
-  // 限流和额度：照常重试，另外把模型记下来，阶段 3 的改派从这里读。
+  // 限流和额度：模型标到重置时间，这条链上此刻还有能用的候选就立刻改派接上；都不能用就只通知一次。
   if (diagnosis && HOLD_MODEL.has(diagnosis.category)) {
     const configured = configuration(draft.view, run.rules_version).agents[run.agent];
     const model = diagnosis.model ?? configured?.model;
@@ -519,6 +651,16 @@ function retryLater(draft: Draft, run: Row, result: Result) {
         run: id,
         at: draft.at,
       });
+    }
+    const rule = ruleNamed(draft, run.rule);
+    if (rule) {
+      const found = resolve(draft, rule, undefined, rows(draft.view, "runs", { state: "claimed" }));
+      if (found.picked) notBefore = draft.now;
+      else {
+        const resume = probeAt(found.skipped);
+        if (resume !== null) notBefore = resume;
+        notifyBlocked(draft, run, found.skipped, resume);
+      }
     }
   }
   // 要人处理：不再自动重试，这一轮按没跑成记，并开一张提问卡片等本人。
@@ -646,6 +788,26 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
   }
   const run = heldRun(draft, id, token, ["claimed", "unknown"]);
   const result = parseResult(given);
+  // 进日志、投影、卡片和档案之前先脱敏：老接单程序或手写的回执可能带着凭据。
+  // session、later.key、事件 payload 这类参与派发和续接的值不动。
+  if (result.error) result.error = redact(result.error);
+  if (result.summary) result.summary = redact(result.summary);
+  if (result.diagnosis?.raw) result.diagnosis.raw = redact(result.diagnosis.raw);
+  if (result.diagnosis?.explain) result.diagnosis.explain = redact(result.diagnosis.explain);
+  for (const notice of result.notice ?? []) {
+    notice.title = redact(notice.title);
+    notice.text = redact(notice.text);
+  }
+  for (const ask of result.ask ?? []) {
+    ask.title = redact(ask.title);
+    ask.text = redact(ask.text);
+    ask.options = ask.options.map(redact);
+    if (ask.about) ask.about = redact(ask.about);
+  }
+  for (const item of result.resolve ?? []) item.reason = redact(item.reason);
+  for (const later of result.later ?? []) {
+    if (later.about) later.about = redact(later.about);
+  }
   // 老回执没有 diagnosis：结局明确的由中枢补上分类，failed 没有证据不猜，行为和旧版一致。
   if (!result.diagnosis) {
     const category = outcomeCategory(result.outcome);
@@ -914,6 +1076,12 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     closeOpen(draft, (key) => key.startsWith("rules:"), "改好了");
   },
   rulesError: (draft, problem) => notify(draft, `rules:${digest(problem)}`, "rules.json 写错了，还在用旧规则", problem),
+  // 清单和规则一样整份替换：新清单坏掉的由外壳报 catalogError，内核这里收到的都是校验过的。
+  catalog(draft, catalog) {
+    put(draft, "config", "catalog", { value: catalog, version: draft.seq });
+  },
+  catalogError: (draft, problem) =>
+    notify(draft, `catalog:${digest(problem)}`, "catalog 清单有问题，还在用旧清单", problem),
   key: (draft, kind, name, hash) =>
     void put(draft, "keys", `${kind}:${name}`, { kind, name, hash, created_at: draft.at }),
   removeKey: (draft, kind, name) => {

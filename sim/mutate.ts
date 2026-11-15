@@ -12,7 +12,7 @@ const edits: [string, string, string, string][] = [
   ["resume-after-stop", "decide.ts", 'last?.state !== "cancelled" && ', ""],
   ["group-capacity", "decide.ts", "claimed.filter((other) => other.grp === run.grp).length <", "0 <"],
   ["lane-exclusion", "decide.ts", "!claimed.some((other) => other.grp === run.grp && other.lane === run.lane)", "true"],
-  ["worker-boundary", "decide.ts", "!agents.includes(rule.to)", "false"],
+  ["worker-boundary", "decide.ts", "draft.rules.agents[found.picked].worker !== worker", "false"],
   ["retry-delay", "decide.ts", "5 * MINUTE * 2 ** (attempts - 1)", "0 * MINUTE * 2 ** (attempts - 1)"],
   [
     "receipt-replay",
@@ -65,6 +65,7 @@ const tests = [
   "queue-costs",
   "http",
   "resume-thread",
+  "roles",
 ].map((n) => `tests/${n}.test.ts`);
 export function mutate() {
   const root = join(import.meta.dirname, "..");

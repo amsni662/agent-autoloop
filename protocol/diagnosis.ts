@@ -21,6 +21,7 @@ export const CATEGORIES = [
   "owner_stopped",
   "max_failures",
   "rule_deleted",
+  "no_candidate",
   "unclassified",
 ] as const;
 
@@ -74,6 +75,7 @@ export const LABELS: Record<Category, string> = {
   owner_stopped: "本人停止",
   max_failures: "连续失败达上限",
   rule_deleted: "规则已删",
+  no_candidate: "没有能用的候选",
   unclassified: "未能分类",
 };
 
