@@ -2,7 +2,16 @@
 // to give. Time and secrets come in as arguments, so the same input on the same view always decides the same.
 import { credential, digest, type Environment } from "./credentials.ts";
 import { latestBefore, nextRun, parseCron } from "./cron.ts";
-import { deadlines, MINUTE, offlineCard, OFFLINE_AFTER, RUN_LEASE, SEEN_EVERY, WORKER_FRESH } from "./due.ts";
+import {
+  deadlines,
+  LOST_AFTER,
+  MINUTE,
+  offlineCard,
+  OFFLINE_AFTER,
+  RUN_LEASE,
+  SEEN_EVERY,
+  WORKER_FRESH,
+} from "./due.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
 import { iso, keyOf, rows, type Change, type Fact, type Row, type Table, type View } from "./evolve.ts";
 import {
@@ -71,7 +80,18 @@ const CARD_BASICS = { text: "", options: "[]", recommend: null, about: "", state
 const DEFAULTS: Partial<Record<Table, Row>> = {
   runs: {
     attempts: 0,
-    ...nulls("claim", "issued", "last_issued", "last_result", "last_answer", "cancel_at", "resume", "session", "link"),
+    ...nulls(
+      "claim",
+      "issued",
+      "last_issued",
+      "last_result",
+      "last_answer",
+      "cancel_at",
+      "resume",
+      "session",
+      "link",
+      "missed_at",
+    ),
     ...nulls("claimed_at", "seen_at", "finished_at", "summary", "error", "usage", "diagnosis", "archive"),
   },
   cards: {
@@ -708,6 +728,12 @@ function sweep(draft: Draft) {
           detail: hubDetail("no_report", worker, "结果照收，处理照常"),
         });
       }
+      // 在线却一直没再认领、满核实窗：判没跑成，重新排队。设备不在线的不到这里——归属留着等它回来。
+      const lost = (run: Row) =>
+        workerOf(draft.view, run) === worker && run.missed_at && now - Date.parse(run.missed_at) > LOST_AFTER;
+      for (const run of rows(draft.view, "runs", { state: ["claimed", "unknown"] }).filter(lost)) {
+        requeueLost(draft, run);
+      }
     }
     const waiting = waitingOn(draft.view, worker, now);
     if (!waiting.length) continue;
@@ -820,6 +846,9 @@ function onlineNow(draft: Draft, worker: string, claiming?: string) {
   return seen !== undefined && draft.now - Date.parse(seen.seen_at) <= WORKER_FRESH;
 }
 
+/** 下架中的设备：本人让做完手上的、不再领新的。 */
+const draining = (view: View, worker: string) => view.get("drains", worker) !== undefined;
+
 const catalogRoles = (draft: Draft): Catalog["roles"] =>
   (draft.view.get("config", "catalog")?.value as Catalog | undefined)?.roles ?? {};
 
@@ -837,6 +866,10 @@ function resolve(draft: Draft, rule: Rule, claiming: string | undefined, claimed
     const agent = draft.rules.agents[id];
     if (!agent) {
       skipped.push({ candidate: id, reason: "中枢里没登记" });
+      continue;
+    }
+    if (draining(draft.view, agent.worker)) {
+      skipped.push({ candidate: id, reason: `${agent.worker} 下架中` });
       continue;
     }
     if (!onlineNow(draft, agent.worker, claiming)) {
@@ -954,6 +987,10 @@ function claimNext(draft: Draft, worker: string, claim: string, snapshot?: Row) 
   const rules_version = held ? run.rules_version : draft.view.get("config", "rules")!.version;
   const claiming = { state: "claimed", claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
   put(draft, "runs", run.id, { ...claiming, ...nulls("last_issued", "last_result", "last_answer") });
+  // What it holds is how the next check-in tells a run it stopped mentioning from one it never had.
+  const seen = draft.view.get("seen", `worker:${worker}`);
+  const holding: number[] = [...new Set([...(seen?.holding ?? []), run.id])];
+  put(draft, "seen", `worker:${worker}`, { kind: "worker", name: worker, holding });
   return jobOf(draft.view, draft.view.get("runs", run.id)!, draft.env);
 }
 
@@ -970,13 +1007,50 @@ const ruleGone = (run: Row): [string, string] => [
   `规则「${run.rule}」不在了（删掉或改名了），排着的这一轮不再派发。还要做的话重新触发这件事。`,
 ];
 
+/** Queued runs of this thread fold into the one going back: one matter doesn't queue twice, late events tag along. */
+function foldQueued(draft: Draft, run: Row) {
+  const waiting = rows(draft.view, "runs", { rule: run.rule, lane: run.lane, state: "queued" });
+  for (const other of waiting.filter((other) => other.id !== run.id)) {
+    for (const link of rows(draft.view, "run_events", { run_id: other.id })) {
+      put(draft, "run_events", `${run.id}:${link.event_id}`, { run_id: run.id, event_id: link.event_id });
+      set(draft, "run_events", `${other.id}:${link.event_id}`, null);
+    }
+    set(draft, "runs", other.id, null);
+    if (other.resume) put(draft, "runs", run.id, { resume: other.resume });
+  }
+}
+
+/** An online worker that never claimed a run again past the check window: count it not-run and send it back. */
+function requeueLost(draft: Draft, run: Row) {
+  const { id } = run;
+  const attempts = run.attempts + 1;
+  const error = "接单程序在线却一直没再认领这一轮，按没跑成重新排队";
+  const unclaimed = nulls("claim", "claimed_at", "seen_at", "cancel_at", "missed_at");
+  if (attempts >= MAX_ATTEMPTS) {
+    const summary = `连续 ${MAX_ATTEMPTS} 次没跑成，不再自动重试`;
+    const words = `第 ${id} 轮连续 ${MAX_ATTEMPTS} 次没跑成（${error}），不再自动重试。解决后重新触发这件事，它会从头开始。`;
+    put(draft, "runs", id, { attempts, error, ...unclaimed });
+    stopRun(draft, run, "stopped", summary, words, hubDetail("max_failures", null, "解决后重新触发这件事"));
+    return;
+  }
+  if (!ruleNamed(draft, run.rule)) {
+    put(draft, "runs", run.id, { attempts, error, ...unclaimed });
+    stopRun(draft, run, "rule-gone", ...ruleGone(run), hubDetail("rule_deleted", null, "没有后续"));
+    return;
+  }
+  put(draft, "runs", id, { state: "queued", attempts, error, not_before: draft.at, ...unclaimed });
+  closeOpen(draft, (key) => key === `run:${id}:unknown`, "设备没再认领，已重新排队");
+  foldQueued(draft, draft.view.get("runs", id)!);
+  assignQueued(draft, draft.view.get("runs", id)!);
+}
+
 /** A run that didn't get through waits to try again, and takes along whatever came in for the same thing meanwhile. */
 function retryLater(draft: Draft, run: Row, result: Result) {
   const { id } = run;
   const attempts = run.attempts + 1;
   let notBefore = draft.now + Math.min(5 * MINUTE * 2 ** (attempts - 1), 60 * MINUTE);
   const error = (result.error ?? "").trim().replace(/[。.]+$/, "") || "没说原因";
-  const unclaimed = nulls("claim", "claimed_at", "seen_at", "cancel_at");
+  const unclaimed = nulls("claim", "claimed_at", "seen_at", "cancel_at", "missed_at");
   const rejected: Rejected[] = [];
   for (const what of ["ask", "resolve", "later", "events"] as const) {
     for (const _ of result[what] ?? []) rejected.push({ what, reason: "没跑成的一轮只能发通知" });
@@ -1049,15 +1123,7 @@ function retryLater(draft: Draft, run: Row, result: Result) {
     return rejected;
   }
   put(draft, "runs", id, { state: "queued", not_before: iso(notBefore), ...failure });
-  const waiting = rows(draft.view, "runs", { rule: run.rule, lane: run.lane, state: "queued" });
-  for (const other of waiting.filter((other) => other.id !== id)) {
-    for (const link of rows(draft.view, "run_events", { run_id: other.id })) {
-      put(draft, "run_events", `${id}:${link.event_id}`, { run_id: id, event_id: link.event_id });
-      set(draft, "run_events", `${other.id}:${link.event_id}`, null);
-    }
-    set(draft, "runs", other.id, null);
-    if (other.resume) put(draft, "runs", id, { resume: other.resume });
-  }
+  foldQueued(draft, draft.view.get("runs", id)!);
   if (!result.notice?.some((notice) => !notice.fyi) && attempts === 3) {
     const clock = { timeZone: draft.rules.timezone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" } as const;
     const time = new Intl.DateTimeFormat("zh-CN", clock).format(notBefore);
@@ -1367,6 +1433,15 @@ function knownRule(draft: Draft, name: string) {
   throw new NotFound(`没有这条规则：${name}`);
 }
 
+/** A name that counts as a device: an agent lives on it, or it checked in or holds work at some point. */
+function knownWorker(draft: Draft, name: string) {
+  return (
+    Object.values(draft.rules.agents).some((agent) => agent.worker === name) ||
+    draft.view.get("seen", `worker:${name}`) !== undefined ||
+    rows(draft.view, "runs").some((run) => workerOf(draft.view, run) === name)
+  );
+}
+
 const PAUSE_REASON = 500;
 function pauseFields(draft: Draft, given: Row) {
   const { reason = "", until = null } = given ?? {};
@@ -1447,6 +1522,38 @@ const CONTROL = {
     put(draft, "runs", run, { manual: 1, not_before: draft.at });
     return { event: eventId, run };
   },
+  /** Taking a device off: it finishes what's in hand and is routed around for anything new. A fact, not config. */
+  drainWorker(draft: Draft, name: string, by: string, given: Row) {
+    if (!knownWorker(draft, name)) throw new NotFound(`没有这台接单程序：${name}`);
+    const { reason = "" } = given ?? {};
+    if (typeof reason !== "string" || [...reason].length > PAUSE_REASON) {
+      throw new InputError(`下架原因要是 ${PAUSE_REASON} 字以内的文字`);
+    }
+    const existing = draft.view.get("drains", name);
+    const same = existing && existing.reason === reason.trim();
+    if (!same) put(draft, "drains", name, { name, by, reason: reason.trim(), since: existing?.since ?? draft.at });
+    const drain = draft.view.get("drains", name)!;
+    const onIt = (run: Row) => workerOf(draft.view, run) === name;
+    const inHand = rows(draft.view, "runs", { state: ["claimed", "unknown"] }).filter(onIt).length;
+    const queued = rows(draft.view, "runs", { state: "queued" }).filter(onIt).length;
+    return {
+      changed: !same,
+      worker: name,
+      drain: { by: drain.by, reason: drain.reason, since: drain.since },
+      inHand,
+      queued,
+    };
+  },
+  /** A device back on duty: it can claim work again. */
+  resumeWorker(draft: Draft, name: string) {
+    const drain = draft.view.get("drains", name);
+    if (!drain) {
+      if (!knownWorker(draft, name)) throw new NotFound(`没有这台接单程序：${name}`);
+      return { changed: false, worker: name };
+    }
+    set(draft, "drains", name, null);
+    return { changed: true, worker: name, drain: { by: drain.by, reason: drain.reason, since: drain.since } };
+  },
 };
 
 /** Every input there is, each with its arguments named. What one returns is what the caller is told. */
@@ -1499,12 +1606,27 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
   },
   heartbeat(draft, worker, running) {
     closeOffline(draft, worker);
-    const held = (run?: Row) => run?.state === "claimed" && workerOf(draft.view, run) === worker;
-    const inHand = running.map((id: number) => draft.view.get("runs", id)).filter(held);
+    const previous = draft.view.get("seen", `worker:${worker}`);
+    const wasFresh = previous !== undefined && draft.now - Date.parse(previous.seen_at) <= WORKER_FRESH;
+    const held = (run?: Row): run is Row =>
+      run !== undefined && ["claimed", "unknown"].includes(run.state) && workerOf(draft.view, run) === worker;
+    const inHand: Row[] = running.map((id: number) => draft.view.get("runs", id)).filter(held);
+    // What it held at the last stamp and doesn't name now is a miss — if the run's still held, the first miss of this
+    // spell gets marked. What it names again loses the mark. Back after being gone the mark starts over: a reconnected
+    // worker gets a fresh window to say it again or hand the result in.
+    const heldIds = new Set(inHand.map((run) => run.id));
+    const lastHeld: number[] = previous?.holding ?? [];
+    const dropped = lastHeld.filter((id) => !heldIds.has(id)).map((id) => draft.view.get("runs", id));
+    const missed = dropped.filter(held).filter((run) => run.missed_at === null || !wasFresh);
+    const found = inHand.filter((run) => run.missed_at !== null);
+    const stamped = inHand.filter((run) => run.state === "claimed");
+    const holding = [...heldIds, ...missed.map((run) => run.id)];
     // All stamped together, so however many runs a worker has on, it's one fact each time.
-    if ([draft.view.get("seen", `worker:${worker}`), ...inHand].every((row) => justSeen(draft, row))) return;
-    put(draft, "seen", `worker:${worker}`, { kind: "worker", name: worker, seen_at: draft.at });
-    for (const run of inHand) put(draft, "runs", run.id, { seen_at: draft.at });
+    if (!missed.length && !found.length && [previous, ...stamped].every((row) => justSeen(draft, row))) return;
+    put(draft, "seen", `worker:${worker}`, { kind: "worker", name: worker, seen_at: draft.at, holding });
+    for (const run of stamped) put(draft, "runs", run.id, { seen_at: draft.at });
+    for (const run of missed) put(draft, "runs", run.id, { missed_at: draft.at });
+    for (const run of found) put(draft, "runs", run.id, { missed_at: null });
   },
   channelSeen(draft, name) {
     if (justSeen(draft, draft.view.get("seen", `channel:${name}`))) return;

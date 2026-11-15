@@ -23,6 +23,7 @@ const VIEWS = {
   seen: "kind name seen_at",
   keys: "kind name hash created_at",
   pauses: "name by reason since until",
+  drains: "name by reason since",
   model_holds: "model until reason by run at",
   usage: "device date agent model source input output cache_read cache_write runs at",
   quotas: "device provider account plan window used_pct resets_at at",
@@ -279,6 +280,8 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
   // Metered device reports and dispatched-run usage side by side: `usage` is the whole spend, `spending` stays runs only.
   const usage = usageOf(all, config ?? (() => rules), rules, { days: 7 }, now);
   const today = usage.days.find((day) => day.date === usage.until);
+  const drains = all<Row>("SELECT name, by, reason, since FROM drains ORDER BY name");
+  const draining = new Set(drains.map((drain) => drain.name));
   return {
     now: iso(now),
     timezone: rules.timezone,
@@ -311,6 +314,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       skippedAt: eventRule(rule) ? null : (skippedAt.get(rule.name) ?? null),
     })),
     pauses,
+    drains,
     skipped: all<Row>(SKIPPED).map(skippedView),
     // 指令关口的判断记录：每条被扣下的指令的分数、理由和去向。
     gates: all<Row>("SELECT * FROM gates ORDER BY created_at DESC LIMIT 50").map(
@@ -336,7 +340,16 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
     }),
     agents: Object.entries(rules.agents).map(([id, { name, use, worker, program }]) => {
       const totals = tally(counts.filter((row) => row.agent === id));
-      return { id, name, use, worker, ...(program && { program }), ...presence(`worker:${worker}`), totals };
+      return {
+        id,
+        name,
+        use,
+        worker,
+        ...(program && { program }),
+        ...presence(`worker:${worker}`),
+        draining: draining.has(worker),
+        totals,
+      };
     }),
     channels: Object.entries(rules.channels).map(([id, { name }]) => ({ id, name, ...presence(`channel:${id}`) })),
     runs: visible.map((run) => ({

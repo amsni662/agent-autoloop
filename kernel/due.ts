@@ -1,7 +1,7 @@
 // The next moment each thing needs the clock: schedules, reviews, retries, card resends, a worker gone quiet, a lease
 // run out. The shell keeps one timer, for the earliest of them, so nothing has to poll.
 import { rows, type Row, type View } from "./evolve.ts";
-import { configuration, waitingOn, workers } from "./query.ts";
+import { configuration, waitingOn, workerOf, workers } from "./query.ts";
 
 export const MINUTE = 60_000;
 /** A worker seen this recently is really there, so a run it has stopped mentioning has really gone quiet. */
@@ -10,6 +10,11 @@ export const WORKER_FRESH = 2 * MINUTE;
 export const RUN_LEASE = 5 * MINUTE;
 /** How long work can wait on a worker that doesn't come before the owner hears. */
 export const OFFLINE_AFTER = 10 * MINUTE;
+/**
+ * How long an online worker can keep omitting a run before it's counted not-run and queued again. Well past the
+ * lease, so a run in doubt still gets its full window to be reported or handed in first.
+ */
+export const LOST_AFTER = 3 * RUN_LEASE;
 /**
  * How often being seen goes in the log. A worker asks every second with work in hand and a fact is a disk sync, so a stamp
  * can be behind the last contact by this much. It has to stay under what reads it: with the 50 seconds between idle polls,
@@ -50,6 +55,16 @@ export function deadlines(view: View, now: number) {
   for (const delivery of rows(view, "deliveries", { given_up: 0, not_before: { not: null } })) {
     const notBefore = Date.parse(delivery.not_before);
     if (notBefore > now) add("delivery", `${delivery.card_id}:${delivery.channel}`, notBefore);
+  }
+  // A run an online worker stopped mentioning: check it again once the look-into-it window has run out.
+  for (const run of rows(view, "runs", { state: ["claimed", "unknown"] })) {
+    if (!run.missed_at) continue;
+    const worker = workerOf(view, run);
+    if (!worker) continue;
+    const seen = view.get("seen", `worker:${worker}`);
+    if (!seen || now - Date.parse(seen.seen_at) > WORKER_FRESH) continue;
+    const at = Math.max(now, Date.parse(run.missed_at) + LOST_AFTER + 1);
+    if (at <= Date.parse(seen.seen_at) + WORKER_FRESH) add("lost", String(run.id), at);
   }
   for (const worker of workers(view)) {
     const seen = view.get("seen", `worker:${worker}`);

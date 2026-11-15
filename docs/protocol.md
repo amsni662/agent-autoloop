@@ -168,6 +168,8 @@ GET /v1/events/34                  Authorization: Bearer <来源的密钥>
 | `nothing`   | 看过了，没事可做                                                                           |
 | `cancelled` | 结束了，没做成：连续 10 次没跑成不再重试、规则删掉了（`summary` 写明是哪种），或本人停掉的 |
 
+一台接单程序一直在线、却连着超过 15 分钟没再认领它名下的一轮（`claimed` 或 `unknown`，从它报到时不再带这一轮算起）：中台判这一轮没跑成，`attempts` 记一次，重新排队，原因写在 `error` 里，它名下那张 `unknown` 卡片合上。报到里又出现这一轮，漏报就重新算起；整个不在线的设备不做这个判断，它名下的轮次留着等它回来。重排的轮次和没跑成重试一样，把同一事项期间新来的事件并进去；旧 `claim` 作废，迟来的旧令牌回执照样被拒，同一轮不按两次记。这一版之前的旧日志里没有漏报记录，已领的轮次照旧等着，不自动重排。
+
 三种别的进法，到中台都是同一种事件：
 
 - **定时**：规则写 `cron`。错过的（比如电脑合盖了）醒来只补最近的一次。重复的时刻（夏令时）只跑第一次，不存在的时刻跳过。
@@ -198,7 +200,7 @@ POST /v1/tell    { "task": "每周清理", "ask": { "title", "text", "options": 
 
 ```
 GET /v1/work?claim=<这次领活的编号>&wait=50&running=7,8&capacity=1    Authorization: Bearer <接单程序的密钥>
-→ 200 { "job": null | Job, "cancel": [7] }
+→ 200 { "job": null | Job, "cancel": [7], "draining": true }
 
 GET /v1/archive/<项目编号>[?version=<n>]    Authorization: Bearer <接单程序的密钥>
 → 200 { "project", "version", "commit", "updatedAt", "manual", "status", "log", "decisions", "checkpoints", "summary" }
@@ -209,6 +211,7 @@ GET /v1/archive/<项目编号>[?version=<n>]    Authorization: Bearer <接单程
 - 手上有活时可以每秒来问活、查取消。心跳最多一分钟记进日志一次，手上有几轮都只记一条；通道领卡片也一样。所以 `/v1/state` 的 `seenAt` 可能比最后一次来的时间早不到一分钟，“5 分钟没报”“10 分钟没连上”也可能因此提前不到一分钟判断；`online` 留了这一分钟的余量，记录后 3 分钟内都算在线。
 - 响应丢了，用同一个 `claim` 再来一次，拿回的是同一份活。
 - `cancel` 是要停掉的。Unix 接单程序先向整个进程组发停止信号，10 秒后仍有进程运行就强制结束；Windows 每轮运行在独立 Job Object 中，停止时结束整个子进程树。确认进程已停止后才交 `outcome: "cancelled"`，这个事项才放开。停止期间重启接单程序也继续这一步。要停的这一轮交回 `failed` 也算停了，不再重试。
+- `draining` 只在这台接单程序下架中才出现且恒为 `true`：本人让它做完手上的、不再领新的，`job` 一直是 `null`，`cancel` 照常。旧接单程序不认这个字段没关系，领不到活本身就和现在一样。
 
 ```jsonc
 // Job：一轮的全部。token 只对这一轮的这一次执行有效。
@@ -335,7 +338,7 @@ GET /v1/cards/next?wait=50    Authorization: Bearer <通道的密钥>
 
 ```
 GET  /v1/state              Authorization: Bearer <本人的密钥>
-→ 200 { "seq", "totals", "cards", "recentCards", "agents", "channels", "sources", "lines", "pauses", "skipped", "elsewhere", "runs", "nextBefore", "hasMore", "unrouted", "spending", "timers", "now", "timezone" }
+→ 200 { "seq", "totals", "cards", "recentCards", "agents", "channels", "sources", "lines", "pauses", "drains", "skipped", "elsewhere", "runs", "nextBefore", "hasMore", "unrouted", "spending", "timers", "now", "timezone" }
 
 POST /v1/cards/56/answer    { "choice": 1 } 或 { "text": "别的想法" }
 POST /v1/cards/56/resolve   { "reason": "不用决定了，因为……" }
@@ -383,6 +386,17 @@ POST /v1/rules/巡检/run        { "subject": "#12", "reason": "看一眼" }    
 立即运行走正常派活：记一条 `run.manual` 事件（定时规则的来源是 `schedule`，事件规则用它的 `when.source`），`summary` 是“<密钥名> 手动运行”，`detail` 是 `reason`；`subject` 决定 `parallel` 规则的事项。同一事项已经有排队的一轮时并进那一轮，并取消它的重试等待。这一轮的 `runs[].manual` 为 true。**暂停中的规则不能立即运行**，返回 409 `规则「…」暂停中，先恢复再手动运行`：暂停的意思是这条规则一件活都不派，手动运行也不例外，这样“暂停了就不会再花钱、不会再对外动作”这一条没有例外。要试跑就先恢复再运行。
 
 `/v1/state` 里每条规则（`lines[]`）多了 `paused`（生效中的暂停：`by`、`reason`、`since`、`until`、`skipped`，没暂停是 `null`）和 `skippedAt`；顶层多了 `pauses`（所有生效中的暂停，每项带规则名 `name`）和 `skipped`。旧客户端忽略这些字段即可。
+
+下架一台接单程序：做完手上的、不再领新活。本人的操作，是日志里的事实（种类 `drainWorker`、`resumeWorker`），不改 `rules.json`：
+
+```
+POST /v1/workers/<名字>/drain    { "reason": "换机" }       Authorization: Bearer <本人的密钥>
+→ 200 { "changed": true, "worker": "…", "drain": { "by", "reason", "since" }, "inHand": 1, "queued": 0 }
+POST /v1/workers/<名字>/resume   {}
+→ 200 { "changed": true, "worker": "…", "drain": { "by", "reason", "since" } }
+```
+
+`reason` 可以不写；`by` 是所用本人密钥的名字。同样的原因再下架 `changed` 为 false、不追加事实，`since` 保留第一次的；`resume` 对没在下架的返回 `changed: false`。`inHand` 是下架那一刻手上 `claimed`/`unknown` 的轮数，`queued` 是写死这台设备的 Agent 还排着等它的轮数——角色链上的候选派单时跳过下架设备（理由记进轮次的 `resolved`），写死的没人能接，要接手就改 `rules.json` 里 Agent 的 `worker` 或先 `resume`。手上的轮次照跑、回执照收、`cancel` 照常。名字得是中台认得的设备（某个 Agent 的 `worker`、连上过、或持有过轮次），不然 404。下架状态在 `/v1/state` 看得到：顶层 `drains`（每台 `name`、`by`、`reason`、`since`）和每个 Agent 的 `draining`。命令行：`agent-autoloop drain <设备> [--reason 原因]`、`agent-autoloop undrain <设备>`。
 
 命令行：`agent-autoloop pause <规则> [--reason 原因] [--until 时间]`、`resume <规则>`、`replay <规则> --since <时间>`、`run <规则> [--subject 对象] [--reason 说明]`。`pause` 说明暂停期间的事件不排队、恢复时会列出；`resume` 列出这次暂停跳过的事件（最多 20 条，多了写明共几条），并给出补跑这一段的 `replay` 命令；`status` 列出暂停中的规则、从什么时候起、跳过了几条和最近 5 条。已经恢复的规则以前跳过的事件不再出现在 `status` 里。
 

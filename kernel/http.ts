@@ -175,7 +175,10 @@ async function work(call: Call) {
     const wantsWork = !request.signal.aborted && url.searchParams.get("capacity") !== "0";
     const job = wantsWork ? act(call, "claimNext", worker, claim) : null;
     const cancel = cancels(services.view(), worker);
-    if (job || cancel.length || services.now() >= until || request.signal.aborted) return json({ job, cancel });
+    if (job || cancel.length || services.now() >= until || request.signal.aborted) {
+      const draining = services.view().get("drains", worker) !== undefined;
+      return json({ job, cancel, ...(draining && { draining }) });
+    }
     await services.wait(until, request.signal);
   }
 }
@@ -227,6 +230,21 @@ const CONTROL_INPUTS: Record<string, string> = {
   replay: "replayRule",
 };
 
+/** An owner-action body: a JSON object of nothing but the fields this action takes. */
+async function controlBody(call: Call, fields: string[]) {
+  const text = await readText(call.request);
+  let given: unknown = {};
+  try {
+    if (text.trim()) given = JSON.parse(text);
+  } catch {
+    throw new InputError("不是 JSON");
+  }
+  if (!given || typeof given !== "object" || Array.isArray(given)) throw new InputError("要是一个 JSON 对象");
+  const unknown = Object.keys(given).filter((field) => !fields.includes(field));
+  if (unknown.length) throw new InputError(`不认识的字段：${unknown.join("、")}`);
+  return given as Record<string, unknown>;
+}
+
 /** Pause, resume, run a rule now, or replay what its pause skipped: the owner's, kept in the log. */
 async function control(call: Call, encoded: string, action: string) {
   const holder = requireKey(call, "owner");
@@ -236,16 +254,7 @@ async function control(call: Call, encoded: string, action: string) {
   } catch {
     throw new InputError("名字不正确");
   }
-  const text = await readText(call.request);
-  let given: unknown = {};
-  try {
-    if (text.trim()) given = JSON.parse(text);
-  } catch {
-    throw new InputError("不是 JSON");
-  }
-  if (!given || typeof given !== "object" || Array.isArray(given)) throw new InputError("要是一个 JSON 对象");
-  const unknown = Object.keys(given).filter((field) => !CONTROL_FIELDS[action].includes(field));
-  if (unknown.length) throw new InputError(`不认识的字段：${unknown.join("、")}`);
+  const given = await controlBody(call, CONTROL_FIELDS[action]);
   const type = CONTROL_INPUTS[action];
   if (action === "replay") {
     const { since } = given as Row;
@@ -262,6 +271,26 @@ async function control(call: Call, encoded: string, action: string) {
   const rule = ruleOf(call.rules, name);
   const skipped = rule && !eventRule(rule) ? null : call.services.skipped(name, done.paused.since);
   return json({ ...done, paused: { ...done.paused, skipped } });
+}
+
+const WORKER_FIELDS: Record<string, string[]> = { drain: ["reason"], resume: [] };
+const WORKER_INPUTS: Record<string, string> = { drain: "drainWorker", resume: "resumeWorker" };
+
+/** Take a device off duty or bring it back: the owner's, kept in the log. */
+async function workerControl(call: Call, encoded: string, action: string) {
+  const holder = requireKey(call, "owner");
+  let name: string;
+  try {
+    name = decodeURIComponent(encoded);
+  } catch {
+    throw new InputError("名字不正确");
+  }
+  const given = await controlBody(call, WORKER_FIELDS[action]);
+  const done =
+    action === "resume"
+      ? act(call, WORKER_INPUTS[action], name)
+      : act(call, WORKER_INPUTS[action], name, holder, given);
+  return json(done);
 }
 
 const MAX_USAGE_DAYS = 93;
@@ -354,6 +383,8 @@ async function route(call: Call): Promise<Response> {
   if (method === "POST" && card) return cardAction(call, Number(card[1]), card[2]);
   const ruleControl = /^\/v1\/rules\/([^/]+)\/(pause|resume|run|replay)$/.exec(path);
   if (method === "POST" && ruleControl) return control(call, ruleControl[1], ruleControl[2]);
+  const workerControlRoute = /^\/v1\/workers\/([^/]+)\/(drain|resume)$/.exec(path);
+  if (method === "POST" && workerControlRoute) return workerControl(call, workerControlRoute[1], workerControlRoute[2]);
   if (method === "POST" && path === "/v1/usage") {
     return json(act(call, "usage", requireKey(call, "worker"), await readJson(request)));
   }
