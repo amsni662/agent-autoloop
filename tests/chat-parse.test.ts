@@ -98,6 +98,23 @@ test("多张待拍板卡片：必须写卡片号；自由文字仍是任务", ()
   });
 });
 
+test("定过的卡不占待拍板数：唯一开着的卡可省号，# 号仍找得到定过的卡", () => {
+  // #5 已拍定，#7 是唯一还开着的：裸「1」「确认」和自由文字都归 #7，不被要求写卡号。
+  const pending = [
+    { id: 5, options: 3, open: false },
+    { id: 7, options: 4 },
+  ];
+  assert.deepEqual(parseMessage("1", ctx({ pending })), { kind: "answer", card: 7, choice: 0 });
+  assert.deepEqual(parseMessage("确认", ctx({ pending })), { kind: "answer", card: 7, confirm: true });
+  assert.deepEqual(parseMessage("想想再定", ctx({ pending })), { kind: "answer", card: 7, text: "想想再定" });
+  // # 号写定过的卡：照交，让中枢回「已经定过了」——不许回「没有这张卡」。
+  assert.deepEqual(parseMessage("#5 2", ctx({ pending })), { kind: "answer", card: 5, choice: 1 });
+  // 两张开着的才算「多卡」：一张定过、两张开着仍要写卡号。
+  const multi = [...pending, { id: 9, options: 2 }];
+  assert.deepEqual(parseMessage("1", ctx({ pending: multi })), { kind: "answer-hint", reason: "needs-id" });
+  assert.deepEqual(parseMessage("确认", ctx({ pending: multi })), { kind: "answer-hint", reason: "needs-id" });
+});
+
 test("不能按编号找消息的通道，# 写法回提示", () => {
   const pending = [{ id: 5, options: 3 }];
   assert.deepEqual(parseMessage("#5 1", ctx({ pending, numbered: false })), {

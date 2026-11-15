@@ -134,6 +134,66 @@ test("发通知+拍板：送达报告 clientId 为 ref，# 号回答带对 by/re
   ilink.close();
 });
 
+test("拍定的卡不占待拍板：唯一 open 卡可省号，定过的卡给诚实回答", async () => {
+  const ilink = await startFakeIlink();
+  const app = await createWechatApp({ configFile: configFile("wx5.json"), io: thinIlinkClient(ilink.baseUrl) });
+  try {
+    ilink.feed([inboundText({ message_id: "w5-hello", text: "帮助" })]);
+    await app.pollOnce();
+    const texts = () => ilink.calls.sends.map((call) => call.msg.item_list[0].text_item.text as string);
+    // Drain leftovers from earlier tests first (the hub re-offers decided cards), so each offer below is the new card.
+    const drain = async () => {
+      while (await app.deliverOnce(0)) {}
+    };
+
+    const a = hubFns.createCard({ key: "w5-a", kind: "ask", title: "删缓存吗", options: ["删", "留着"], recommend: 0 });
+    await drain();
+    assert.ok(
+      texts().some((text) => text.includes(`#${a.card}`)),
+      "卡 A 得发到微信",
+    );
+    ilink.feed([inboundText({ message_id: "w5-a1", text: `#${a.card} 1` })]);
+    await app.pollOnce();
+    assert.equal(hubFns.getView().get("cards", a.card)!.state, "decided");
+
+    // 索引还没清掉前重复拍同一张：中枢说「已经定过了」，原样转达。
+    ilink.feed([inboundText({ message_id: "w5-a2", text: `#${a.card} 1` })]);
+    await app.pollOnce();
+    assert.match(texts().at(-1)!, /已经定过/);
+
+    const b = hubFns.createCard({ key: "w5-b", kind: "ask", title: "发布吗", options: ["发", "等会"], recommend: 0 });
+    // 中枢把已定卡的更新版再 offer 一遍（delivery.ref 非空值得发）：政策压下，顺手把索引里的它忘掉。
+    await drain();
+    assert.deepEqual(
+      app.pending().map((c) => c.id),
+      [b.card],
+      "待拍板只剩真正开着的卡",
+    );
+
+    // 「等你拍板」附言只数开着的：#A 不再出现。
+    ilink.feed([inboundText({ message_id: "w5-proj", text: "项目" })]);
+    await app.pollOnce();
+    const suffix = texts().find((text) => /另外有.*等你拍板/.test(text));
+    assert.ok(suffix?.includes(`#${b.card}`), `附言该提 #${b.card}：${suffix}`);
+    assert.ok(!suffix?.includes(`#${a.card}`), `附言不该提已定的 #${a.card}：${suffix}`);
+
+    // 唯一开着的卡：裸「1」直接拍它，不再被要求写卡片号。
+    ilink.feed([inboundText({ message_id: "w5-b1", text: "1" })]);
+    await app.pollOnce();
+    const decidedB = hubFns.getView().get("cards", b.card)!;
+    assert.equal(decidedB.state, "decided");
+    assert.equal(decidedB.choice, 0);
+
+    // 已决版重投被消化后，#A 得到的是「没有待拍板的卡片」。
+    ilink.feed([inboundText({ message_id: "w5-a3", text: `#${a.card} 1` })]);
+    await app.pollOnce();
+    assert.match(texts().at(-1)!, /没有待拍板的卡片/);
+  } finally {
+    await app.stop();
+    ilink.close();
+  }
+});
+
 test("并发重投：两个批次同时处理同一条 message_id，只派一次", async () => {
   const ilink = await startFakeIlink();
   const app = await createWechatApp({ configFile: configFile("wx4.json"), io: thinIlinkClient(ilink.baseUrl) });

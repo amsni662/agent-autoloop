@@ -185,6 +185,9 @@ export async function createWechatApp(opts: WechatOpts) {
         } | null;
       };
       if (!card) return false;
+      // The hub re-offers a card once it's decided (the answer bumped its version): whatever path this
+      // round takes, it no longer awaits an answer — drop it from the index.
+      if (card.state !== "open") forgetCard(state, card.id);
       try {
         const verdict = classify(card, policy);
         if (!verdict.send) {
@@ -220,8 +223,6 @@ export async function createWechatApp(opts: WechatOpts) {
             title: card.title,
             recommend: card.recommend ?? null,
           });
-        } else {
-          forgetCard(state, card.id);
         }
         // Mark before the ack: a crash after the send must not send the text twice on re-offer.
         markNotified(state, card.id, card.version);

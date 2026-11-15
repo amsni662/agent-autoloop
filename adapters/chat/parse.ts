@@ -3,10 +3,12 @@
 // first); with more than one open card a bare "1" or "确认" asks for the card number rather than guessing.
 import { resolveProject, type Project } from "./projects.ts";
 
-export type PendingRef = { id: number; options: number; kind?: string };
+export type PendingRef = { id: number; options: number; kind?: string; open?: boolean };
 export type ChatContext = {
   projects: Project[];
   current: string | null;
+  /** Every card the adapter remembers; `open: false` marks a decided one — bare answers never aim at
+   * it, but "#<号>" can still name it so the hub can say it was already settled. */
   pending: PendingRef[];
   /** Whether "#<卡片号>" can name a card on this channel (WeChat yes, Feishu no). */
   numbered: boolean;
@@ -101,8 +103,9 @@ export function parseMessage(raw: string, ctx: ChatContext): Action {
     }
   }
 
-  if (ctx.pending.length === 1) return answerTo(ctx.pending[0], text);
-  if (ctx.pending.length > 1 && /^(\d+|确认)$/.test(text)) return { kind: "answer-hint", reason: "needs-id" };
+  const open = ctx.pending.filter((card) => card.open !== false);
+  if (open.length === 1) return answerTo(open[0], text);
+  if (open.length > 1 && /^(\d+|确认)$/.test(text)) return { kind: "answer-hint", reason: "needs-id" };
 
   if (!ctx.current) {
     if (ctx.projects.length === 1) return { kind: "task", project: ctx.projects[0].id, requirement: text };

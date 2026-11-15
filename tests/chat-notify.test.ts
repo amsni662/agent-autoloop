@@ -55,6 +55,16 @@ test("sanitize：hub=commit、长串、路径、堆栈、JSON、英文分类、�
   assert.match(out, /AI Loop 进度：已开始/);
 });
 
+test("sanitize：修轮会话代号（T15r1 这类 rN 后缀）也不出门", () => {
+  const out = sanitize("S15r1 修完发了部署通知，T9r2 正在验收，原始 S9 已交付");
+  for (const bad of ["S15r1", "T9r2", "S15", "T9", "S9"]) {
+    assert.ok(!out.includes(bad), `漏了「${bad}」：${out}`);
+  }
+  assert.match(out, /修完发了部署通知/);
+  // 「S12r」这种半截写法不是会话代号，不误伤。
+  assert.match(sanitize("参数 S12r 保留"), /S12r/);
+});
+
 test("sanitize：多行 JSON 整块剥除——开头行、键值行、缩进、闭合行都不许出门", () => {
   const pretty = JSON.stringify({ error: { type: "forbidden", msg: "no" }, code: 403 }, null, 2);
   const out = sanitize(`出错了，原文在下：\n${pretty}\n上面那段不许给本人看`);
