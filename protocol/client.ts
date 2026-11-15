@@ -38,6 +38,9 @@ export function hubClient(url: string, key: string) {
     started: (run: number, token: string, body: { session?: string; link?: string }) =>
       call("POST", `/v1/runs/${run}/started`, { token, body }),
     result: (run: number, token: string, body: unknown) => call("POST", `/v1/runs/${run}/result`, { token, body }),
+    /** A project's archive as the hub serves it, or one version: a worker caches it under that version. */
+    archive: (project: string, version?: number) =>
+      call("GET", `/v1/archive/${encodeURIComponent(project)}${version === undefined ? "" : `?version=${version}`}`),
     /** The worker's usage report: whole days and a quota snapshot, each replacing what it sent of them before. */
     usageReport: (body: unknown) => call("POST", "/v1/usage", { body }),
     // The channel's door.

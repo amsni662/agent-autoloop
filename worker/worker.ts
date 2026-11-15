@@ -22,6 +22,8 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { HubError, type Hub } from "../protocol/client.ts";
 import { HOME } from "../host/home.ts";
+import { readArchive, type ArchiveContent } from "../archive/store.ts";
+import { pullArchive } from "../archive/sync.ts";
 import { commandLine, processCommand } from "../host/command.ts";
 import type { Job } from "../protocol/job.ts";
 import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
@@ -33,6 +35,8 @@ import { loadUsage, saveUsage, usageDelta } from "./usage.ts";
 import type { MeterSource } from "../host/config.ts";
 
 const RUNS = path.join(HOME, "worker", "runs");
+/** Read-only archive copies this device keeps, one directory per project, swapped in whole by version. */
+const ARCHIVES = path.join(HOME, "worker", "archives");
 const NOTHING: Usage = { input: 0, output: 0, cached: 0, cost: 0 };
 const TIMEOUT_MINUTES = 180;
 /** A reader of the turn's end that doesn't exit is given this long. */
@@ -72,8 +76,10 @@ type Entry = {
   stopping?: number;
   why?: "cancel" | "timeout" | "finished";
   result?: Result;
+  /** What prepareArchive managed to put under ARCHIVES for this job's project, or fell back on. */
+  archive?: { project: string; version: number; path: string; summary: string; stale?: number };
 };
-export type WorkerHub = Pick<Hub, "work" | "started" | "result"> & Partial<Pick<Hub, "usageReport">>;
+export type WorkerHub = Pick<Hub, "work" | "started" | "result"> & Partial<Pick<Hub, "usageReport" | "archive">>;
 export type WorkerOptions = {
   hub: WorkerHub;
   name: string;
@@ -366,6 +372,111 @@ export function createWorker({
     endWith(entry, result);
   }
 
+  /** The cache copy already on disk, or null. Its own 档案.json says which version it is; a materialized copy keeps
+   * the summary in it, a pulled bucket copy is a real archive and answers for itself. */
+  const cacheOf = (project: string) => {
+    try {
+      const meta = JSON.parse(readFileSync(path.join(ARCHIVES, project, "档案.json"), "utf8"));
+      const summary = typeof meta.summary === "string" ? meta.summary : readArchive(project, ARCHIVES).summary;
+      return { version: Number(meta.version) || 0, summary };
+    } catch {
+      return null;
+    }
+  };
+
+  /** A fetched archive becomes the cache copy in one swap: a partial write can't leave a torn one. */
+  function materialize(dir: string, content: ArchiveContent) {
+    const tmp = `${dir}.tmp-${process.pid}`;
+    // A swap killed mid-way left an earlier attempt's tmp behind: it can't be read as a copy, sweep it first.
+    try {
+      for (const name of readdirSync(path.dirname(dir))) {
+        if (name.startsWith(`${path.basename(dir)}.tmp-`)) {
+          rmSync(path.join(path.dirname(dir), name), { recursive: true, force: true });
+        }
+      }
+    } catch {}
+    rmSync(tmp, { recursive: true, force: true });
+    mkdirSync(path.join(tmp, "检查点"), { recursive: true });
+    writeFileSync(path.join(tmp, "说明书.md"), content.manual);
+    writeFileSync(path.join(tmp, "状态.md"), content.status);
+    writeFileSync(path.join(tmp, "日志.md"), content.log);
+    writeFileSync(path.join(tmp, "决定.md"), content.decisions);
+    writeFileSync(
+      path.join(tmp, "档案.json"),
+      `${JSON.stringify(
+        {
+          project: content.project,
+          version: content.version,
+          head: content.commit,
+          summary: content.summary,
+          updatedAt: content.updatedAt,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    rmSync(dir, { recursive: true, force: true });
+    renameSync(tmp, dir);
+  }
+
+  /** Fill or reuse this device's cache for the version the job names: hub first, its bucket copy when it's away. */
+  async function prepareArchive(job: Job): Promise<Entry["archive"]> {
+    const want = job.archive;
+    if (!want) return undefined;
+    const dir = path.join(ARCHIVES, want.project);
+    const cached = cacheOf(want.project);
+    if (want.version > 0 && cached?.version === want.version) {
+      return { project: want.project, version: want.version, path: dir, summary: cached.summary };
+    }
+    if (want.version > 0) {
+      if (hub.archive) {
+        try {
+          const content = (await hub.archive(want.project, want.version)) as ArchiveContent;
+          materialize(dir, content);
+          return { project: want.project, version: content.version, path: dir, summary: content.summary };
+        } catch (error) {
+          log(`archive ${want.project}: couldn't get v${want.version} from the hub: ${error}`);
+        }
+      }
+      try {
+        const pulled = await pullArchive(want.project, ARCHIVES, { version: want.version });
+        return {
+          project: want.project,
+          version: pulled.version,
+          path: dir,
+          summary: cacheOf(want.project)?.summary ?? want.summary,
+        };
+      } catch (error) {
+        log(`archive ${want.project}: couldn't pull the bucket copy: ${error}`);
+      }
+    }
+    // Everything reachable failed: the stale copy on disk is still something to read, and its version says how stale.
+    if (cached) {
+      return {
+        project: want.project,
+        version: cached.version,
+        path: dir,
+        summary: cached.summary,
+        stale: want.version,
+      };
+    }
+    return { project: want.project, version: 0, path: "", summary: want.summary, stale: want.version };
+  }
+
+  /** context.json for a run: the hub's context plus where this job's archive lives on this machine. */
+  const contextOf = (entry: Entry) => ({
+    ...entry.job.context,
+    ...(entry.archive && {
+      archive: {
+        project: entry.archive.project,
+        version: entry.archive.version,
+        summary: entry.archive.summary,
+        ...(entry.archive.path && { path: entry.archive.path }),
+        ...(entry.archive.stale !== undefined && { stale: entry.archive.stale }),
+      },
+    }),
+  });
+
   async function start(job: Job) {
     const dir = path.join(RUNS, `${job.run}-${job.attempt}`);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -385,7 +496,8 @@ export function createWorker({
     // Kept before anything slow: a worker stopped from here on still has the job.
     save(entry);
     try {
-      writeFileSync(path.join(dir, "context.json"), JSON.stringify(job.context, null, 2), { mode: 0o600 });
+      entry.archive = await prepareArchive(job);
+      writeFileSync(path.join(dir, "context.json"), JSON.stringify(contextOf(entry), null, 2), { mode: 0o600 });
       const adapter = await adapterFor(job.agent.use);
       entry.prompt = promptFor(job, path.join(dir, "context.json"));
       save(entry);
@@ -505,7 +617,8 @@ export function createWorker({
       // The worker stopped while starting it, before anything was launched.
       if (!entry.prompt) entry.prompt = promptFor(entry.job, path.join(entry.dir, "context.json"));
       try {
-        writeFileSync(path.join(entry.dir, "context.json"), JSON.stringify(entry.job.context, null, 2), {
+        entry.archive ??= await prepareArchive(entry.job);
+        writeFileSync(path.join(entry.dir, "context.json"), JSON.stringify(contextOf(entry), null, 2), {
           mode: 0o600,
         });
         return launch(entry, adapter, entry.prompt);

@@ -188,8 +188,12 @@ POST /v1/tell    { "task": "每周清理", "ask": { "title", "text", "options": 
 ```
 GET /v1/work?claim=<这次领活的编号>&wait=50&running=7,8&capacity=1    Authorization: Bearer <接单程序的密钥>
 → 200 { "job": null | Job, "cancel": [7] }
+
+GET /v1/archive/<项目编号>[?version=<n>]    Authorization: Bearer <接单程序的密钥>
+→ 200 { "project", "version", "commit", "updatedAt", "manual", "status", "log", "decisions", "checkpoints", "summary" }
 ```
 
+- 档案读口：不带 `version` 返回当前版，带 `version`（非负整数）返回那一版的内容。接单程序按 `job.archive` 的 `project`+`version` 取用并在本机缓存；中枢不在时拉桶里副本（见[项目档案](ai-loop/项目档案.md)的同步一节）。
 - 没活时最多等 `wait` 秒，新活一来立即返回。`running` 是手上在跑的，同时也是心跳。`capacity=0` 只报到、不领活。
 - 手上有活时可以每秒来问活、查取消。心跳最多一分钟记进日志一次，手上有几轮都只记一条；通道领卡片也一样。所以 `/v1/state` 的 `seenAt` 可能比最后一次来的时间早不到一分钟，“5 分钟没报”“10 分钟没连上”也可能因此提前不到一分钟判断；`online` 留了这一分钟的余量，记录后 3 分钟内都算在线。
 - 响应丢了，用同一个 `claim` 再来一次，拿回的是同一份活。
@@ -203,6 +207,7 @@ GET /v1/work?claim=<这次领活的编号>&wait=50&running=7,8&capacity=1    Aut
   "agent": { "id": "claude", "name": "Claude Code", "use": "claude", "model": "…", "effort": "high", "access": "edit" },
   "session": null,       // 尽量接着的会话：重派时是上一次的，回答来了是提问那一轮的，规则写了 resume 时是这个事项上一轮的。接不上就开新的，所以它只是优化
   "askFirst": ["删数据", "…"],
+  "archive": { "project": "shop", "address": "archive/shop", "version": 3, "summary": "…" },  // 仅项目规则：档案指针；接单程序按 project+version 在本机备好档案，把路径写进 context 的 archive 段
   "context": {           // 接单程序把它写成文件交给 Agent，都是资料
     "events":  [{ "id", "source", "sourceName", "type", "subject", "summary", "detail", "link", "receivedAt" }],
     "answers": [{ "card", "title", "options", "choice", "chosen", "text", "about", "by", "at" }],  // 这一轮要接着做的决定；choice 是从 0 起的下标，chosen 是所选那项的文字，自由文字回答时就是那句回答
@@ -232,7 +237,8 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
   "notice":  [{ "title", "text", "key", "fyi": true }],
   "resolve": [{ "card": 3, "reason": "在哪核实了已解决" }],
   "later":   [{ "key": "…", "at": "2026-11-05T09:00:00+08:00", "about": "到时候查什么" }, { "key": "…", "cancel": true }],
-  "events":  [{ "id", "type", "subject", "summary", "detail", "link" }]
+  "events":  [{ "id", "type", "subject", "summary", "detail", "link" }],
+  "archive": { "base": 3, "log": ["一条进展"], "status": "新的状态整篇（要改才写）", "decisions": ["一条决定"] }
 }
 ```
 
@@ -247,6 +253,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 - `resolve` 只能结同来源、同组、这一轮领活前就有的卡片，越界的写进 `rejected`，不影响这一轮的结果。
 - `later` 的 `key` 范围是这个事项，同一个 `key` 再写一次就是改时间。
 - `events` 的来源由规则的 `emits` 决定，回执改不了。
+- `archive` 是项目规则的档案写回（约定见[项目档案](ai-loop/项目档案.md)）：`base` 必填，是这一轮读到的版本号；`log`、`decisions` 逐条追加，`status` 整篇替换。`base` 落后当前版本时可追加的照合并、`status` 不覆盖，那一轮标 `conflict` 并发卡片问本人。项目规则的 `done` 回执不带 `archive` 段时这一轮标 `missing` 并提醒（`command` 类 Agent 豁免）；项目规则的每一轮结束后中枢还会自动往 `日志.md` 追加一条记录，不需要回执做什么。
 
 ### Agent 只需要做一件事
 
@@ -256,7 +263,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 第一行一句话结论。可自动重试的临时失败写「没跑成：原因」，需要本人恢复的阻塞写「待你处理：原因」并交 ask，没事可做写「没事可做：原因」。其余结束本轮，事项由回执继续跟进。
 
 ```agent-autoloop
-{ "ask": [ … ], "notice": [ … ], "resolve": [ … ], "later": [ … ], "events": [ … ] }
+{ "ask": [ … ], "notice": [ … ], "resolve": [ … ], "later": [ … ], "events": [ … ], "archive": { "base": 3, "log": [ … ] } }
 ```
 ````
 

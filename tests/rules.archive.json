@@ -1,0 +1,37 @@
+{
+  "timezone": "Asia/Shanghai",
+  "sources": {
+    "app": { "name": "应用" }
+  },
+  "agents": {
+    "a1": { "name": "甲", "worker": "w1", "use": "claude", "model": "m1" },
+    "a3": { "name": "丙", "worker": "w1", "use": "command", "command": ["echo", "{prompt}"] }
+  },
+  "projects": {
+    "proj": { "name": "测试项目", "cwd": "~/x", "archive": "archives/proj" }
+  },
+  "rules": [
+    {
+      "name": "项目活",
+      "when": { "source": "app", "types": ["work.*"] },
+      "to": "a1",
+      "cwd": "~/x",
+      "prompt": "干活",
+      "project": "proj"
+    },
+    {
+      "name": "脚本活",
+      "when": { "source": "app", "types": ["chore.*"] },
+      "to": "a3",
+      "cwd": "~/x",
+      "project": "proj"
+    },
+    {
+      "name": "普通活",
+      "when": { "source": "app", "types": ["plain.*"] },
+      "to": "a1",
+      "cwd": "~/x",
+      "prompt": "干活"
+    }
+  ]
+}

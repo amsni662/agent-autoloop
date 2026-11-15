@@ -18,6 +18,8 @@ export type Job = {
   };
   session: string | null;
   askFirst: string[];
+  /** 规则写了 project 时中枢填上：档案在哪、领活时的版本、一句话摘要。老接单程序会忽略它。 */
+  archive?: { project: string; address: string; version: number; summary: string };
   context: {
     events: {
       id: string;

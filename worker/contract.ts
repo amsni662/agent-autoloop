@@ -8,7 +8,7 @@ import { parseResult, type Result } from "../protocol/validate.ts";
 
 const FAILED = ["没跑成", "FAILED"];
 const NOTHING = ["没事可做", "NOTHING"];
-const RECEIPT_FIELDS = ["ask", "notice", "resolve", "later", "events"];
+const RECEIPT_FIELDS = ["ask", "notice", "resolve", "later", "events", "archive"];
 // A fence closes only on a line of its own. A JSON string can't hold a raw newline, so a ``` inside one, as in an issue
 // body carried in an event's detail, is never the end of the block.
 const BLOCK = /(?<=^|\n)[ \t]*```agent-autoloop[ \t]*\r?\n((?:[^\n]*\n)*?)[ \t]*```[ \t]*(?=\r?\n|$)/g;
@@ -47,6 +47,10 @@ export function promptFor(job: Job, contextFile: string) {
     ? `,\n "events":[{"id":"这件事的固定编号","type":"${rule.emits.types.join(" 或 ")}",` +
       `"subject":"对象","summary":"一句话","link":"网址"}]`
     : "";
+  const archive = job.archive
+    ? `,\n "archive":{"base":<你读到的版本号>,"log":["一条进展"],"status":"新的状态整篇（要改才写）",` +
+      `"decisions":["一条决定（要记才写）"]}`
+    : "";
   return [
     ...titleOf(job),
     `Agent 自动化中台按规则「${rule.name}」把这件活派给你。发生了：`,
@@ -62,6 +66,12 @@ export function promptFor(job: Job, contextFile: string) {
       ? ["这一轮是来接着做回答过的决定（answers）：先读它的 about，核实当前事实，再接着做。"]
       : []),
     ...(context.timers.length ? ["这一轮有到期的复查（timers）：读它的 about，到原处核实。"] : []),
+    ...(job.archive
+      ? [
+          `这轮做的是项目「${job.archive.project}」的活，档案跟着派下来了：资料文件的 archive 段记了它在你这台机器上的位置（path）、你读到的版本号（version）和摘要（summary）；有 stale 字段说明那是旧副本，读的时候以 version 为准。开工先读 path 下的 说明书.md、状态.md、日志.md、决定.md。`,
+          `做完这一轮要在回执里把档案写回去：base 写你读到的那个版本号，log 追加一条进展，status 要写就写整篇新状态，decisions 有决定才写。base 写错或落后了状态会被拒，但日志和决定照样合并。`,
+        ]
+      : []),
     "",
     "怎么结束这一轮：",
     `- 这些事要先征求决定：${askFirst.join("、")}。其余能自己处理的直接做完。定过的事不要再问。`,
@@ -84,7 +94,7 @@ export function promptFor(job: Job, contextFile: string) {
  "notice":[{"title":"一句话","text":"非他亲自做不可的事：要他做什么"}],
  "resolve":[{"card":12,"reason":"在哪核实了已解决或本人已决定"}],
  "later":[{"key":"这次复查的固定名字","at":"带时区的时间，比如 2026-11-05T09:00:00+08:00",\
-"about":"到时候查什么、怎么算过"}]${emits}}`,
+"about":"到时候查什么、怎么算过"}]${emits}${archive}}`,
     "```",
     "- ask 和 notice 会打断人，能不发就不发。写给不看代码、也看不到这一轮对话的人：" +
       "出了什么事，现在恢复没有，有什么影响，要他做什么或你的建议。不写技术缩写、状态码、文件路径和内部编号。" +

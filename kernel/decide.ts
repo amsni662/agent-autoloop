@@ -58,7 +58,7 @@ const DEFAULTS: Partial<Record<Table, Row>> = {
   runs: {
     attempts: 0,
     ...nulls("claim", "issued", "last_issued", "last_result", "last_answer", "cancel_at", "resume", "session", "link"),
-    ...nulls("claimed_at", "seen_at", "finished_at", "summary", "error", "usage", "diagnosis"),
+    ...nulls("claimed_at", "seen_at", "finished_at", "summary", "error", "usage", "diagnosis", "archive"),
   },
   cards: {
     ...CARD_BASICS,
@@ -69,6 +69,8 @@ const DEFAULTS: Partial<Record<Table, Row>> = {
     ...nulls("decided_at", "closed_at"),
   },
   deliveries: NOT_DELIVERED,
+  archive_writes: nulls("run", "by", "marker", "claimed_at"),
+  archives: nulls("commit", "pushed", "push_error", "pushed_at", "updated_at"),
 };
 
 type Given = { type: string; seq: number; now: number; at: string; env: Environment; rules: Rules };
@@ -351,7 +353,95 @@ function sweep(draft: Draft) {
   }
 }
 
-function claimNext(draft: Draft, worker: string, claim: string) {
+/** 项目规则的每一轮做完，往档案自动记的那一行：时间、规则、来源和事件编号、设备、Agent、结局和一句话。 */
+function archiveLogLine(draft: Draft, run: Row, result: Result): string {
+  const rules = configuration(draft.view, run.rules_version);
+  const agent = rules.agents[run.agent];
+  const agentName = agent?.name ?? run.agent ?? "未知";
+  const model = agent?.model ?? "未知";
+  const worker = workerOf(draft.view, run) ?? "未知";
+  const source = sourceOf(draft.view, run.id);
+  const sourceName = source ? (rules.sources[source]?.name ?? source) : "定时";
+  const ids = eventsOf(draft.view, run.id)
+    .map((event) => event.key)
+    .join("、");
+  const label = result.diagnosis ? LABELS[result.diagnosis.category] : "";
+  const what = (result.summary ?? result.error ?? "").replace(/\s+/g, " ").trim();
+  const line =
+    `${timeOf(draft, draft.at)} 「${run.rule}」来源 ${sourceName} 事件 ${ids || "—"} ` +
+    `设备 ${worker} Agent ${agentName}（${model}）${result.outcome}${label ? `·${label}` : ""}：${what}`;
+  return line.slice(0, 500);
+}
+
+/** A finished round on a project rule: queue its log line and its write-back for the shell, and say when the write-back is missing. */
+function noteArchive(draft: Draft, run: Row, result: Result, hash: string) {
+  const rule = ruleNamed(draft, run.rule);
+  const project = rule?.project;
+  if (!project || !draft.rules.projects?.[project]) return;
+  const suffix = hash.slice(0, 10);
+  put(draft, "archive_writes", `log:${run.id}:${suffix}`, {
+    key: `log:${run.id}:${suffix}`,
+    project,
+    kind: "log",
+    run: run.id,
+    payload: JSON.stringify({ log: [archiveLogLine(draft, run, result)] }),
+    state: "pending",
+    created_at: draft.at,
+  });
+  if (result.archive) {
+    put(draft, "archive_writes", `run:${run.id}:${suffix}`, {
+      key: `run:${run.id}:${suffix}`,
+      project,
+      kind: "receipt",
+      run: run.id,
+      by: `第 ${run.id} 轮`,
+      payload: JSON.stringify(result.archive),
+      state: "pending",
+      created_at: draft.at,
+    });
+    put(draft, "runs", run.id, { archive: "pending" });
+    return;
+  }
+  // command 类 Agent 交不了回执，不要求它写回；别的 Agent 说 done 却没交 archive 段的，标成未完成并提醒。
+  const agent = draft.rules.agents[run.agent];
+  if (result.outcome === "done" && agent?.use !== "command") {
+    put(draft, "runs", run.id, { archive: "missing" });
+    notify(
+      draft,
+      `run:${run.id}:archive-missing`,
+      run.rule,
+      `第 ${run.id} 轮做完了，但回执没带档案写回（archive 段）：这一轮已标成未完成。`,
+      {
+        ...threadOf(run),
+        detail: hubDetail("receipt_unreadable", workerOf(draft.view, run) ?? null, "下一轮的回执带上 archive 段"),
+      },
+    );
+  }
+}
+
+function claimNext(draft: Draft, worker: string, claim: string, snapshot?: Row) {
+  // The shell passes what the archives on disk say, on every claim: a pointer the job carries and the owner reads.
+  if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {
+    for (const [project, given] of Object.entries(snapshot)) {
+      if (!draft.rules.projects?.[project] || !given || typeof given !== "object" || Array.isArray(given)) continue;
+      const version = Number((given as Row).version);
+      if (!Number.isSafeInteger(version) || version < 0) continue;
+      const clean = {
+        version,
+        summary: String((given as Row).summary ?? "").slice(0, 500),
+        commit: String((given as Row).commit ?? "").slice(0, 100),
+      };
+      const current = draft.view.get("archives", project);
+      if (
+        !current ||
+        current.version !== clean.version ||
+        current.summary !== clean.summary ||
+        current.commit !== clean.commit
+      ) {
+        put(draft, "archives", project, { project, ...clean, updated_at: draft.at });
+      }
+    }
+  }
   const agents = agentsOf(draft.view, worker);
   const runs = rows(draft.view, "runs", { state: ["queued", "claimed"] });
   const claimed = runs.filter((run) => run.state === "claimed");
@@ -585,6 +675,8 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
     closeStopped(draft, id, "已停止");
   } else if (result.outcome === "failed") rejected = retryLater(draft, run, result);
   else rejected = applyReceipt(draft, run, result);
+  // 项目规则的每一轮做完都记进档案：自动一行、回执带的写回、本人拍板另走 answer 那条。
+  noteArchive(draft, draft.view.get("runs", id)!, result, hash);
   put(draft, "runs", id, { last_answer: JSON.stringify(rejected) });
   return { rejected };
 }
@@ -623,6 +715,23 @@ function answer(draft: Draft, id: number, given: Row) {
   const decision = { choice: given.choice ?? null, answer: text, by: given.by ?? null, decided_at: draft.at };
   put(draft, "cards", id, { state: "decided", ...decision, answer_event: eventId, version: card.version + 1 });
   if (rule) enqueue(draft, rule, eventId, card.lane, card.agent === rule.to ? card.session : null);
+  // 本人对项目规则卡片的回答就是一次拍板：排一条档案写回，外壳把它写进 决定.md。
+  const project = rule?.project;
+  if (project && draft.rules.projects?.[project]) {
+    const chosen = given.choice === undefined ? (text ?? "") : (JSON.parse(card.options) as string[])[given.choice];
+    put(draft, "archive_writes", `card:${id}`, {
+      key: `card:${id}`,
+      project,
+      kind: "decision",
+      run: null,
+      by: given.by ?? "本人",
+      payload: JSON.stringify({
+        decisions: [{ text: `对「${card.title}」选了「${chosen}」`, at: draft.at }],
+      }),
+      state: "pending",
+      created_at: draft.at,
+    });
+  }
   return { changed: true, state: "decided" };
 }
 
@@ -887,6 +996,92 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     return { days: (report.days ?? []).length, rows: count };
   },
   claimNext,
+  /** The shell takes one pending archive write at a time; the marker says who took it, so a dead claimer lets go. */
+  archiveClaim(draft: Draft, key: string, marker: string) {
+    const rec = draft.view.get("archive_writes", key);
+    if (!rec || rec.state !== "pending") return false;
+    put(draft, "archive_writes", key, { state: "writing", marker: String(marker).slice(0, 100), claimed_at: draft.at });
+    return true;
+  },
+  /** Writes stuck in "writing" under a marker that isn't this one's, older than `before`, go back to pending. */
+  archiveStale(draft: Draft, marker: string, before: string) {
+    let count = 0;
+    for (const rec of rows(draft.view, "archive_writes", { state: "writing" })) {
+      if (String(rec.marker).startsWith(`${marker}:`)) continue;
+      if (Date.parse(rec.claimed_at) >= Date.parse(before)) continue;
+      put(draft, "archive_writes", rec.key, { state: "pending", marker: null });
+      count += 1;
+    }
+    return count;
+  },
+  /** What a claimed write came to: the version it landed and its conflicts, or the error that refused it. */
+  archiveDone(draft: Draft, key: string, given: Row) {
+    const rec = draft.view.get("archive_writes", key);
+    if (!rec) return false;
+    set(draft, "archive_writes", key, null);
+    if (Number.isSafeInteger(given?.version)) {
+      put(draft, "archives", rec.project, {
+        project: rec.project,
+        version: given.version,
+        summary: String(given.summary ?? "").slice(0, 500),
+        commit: String(given.commit ?? "").slice(0, 100),
+        updated_at: draft.at,
+      });
+    }
+    const run = rec.run === null ? null : draft.view.get("runs", rec.run);
+    const error = typeof given?.error === "string" && given.error.trim() ? given.error.trim().slice(0, 500) : null;
+    const conflicts = Array.isArray(given?.conflicts) ? given.conflicts.filter((what) => typeof what === "string") : [];
+    if (error) {
+      if (rec.kind === "receipt" && run) {
+        put(draft, "runs", run.id, { archive: "error" });
+        notify(draft, `run:${run.id}:archive-error`, run.rule, `第 ${run.id} 轮的档案写回没写进去：${error}`, {
+          ...threadOf(run),
+        });
+      } else {
+        notify(
+          draft,
+          `archive:${rec.project}:${digest(key).slice(0, 8)}`,
+          "档案写回没写进去",
+          `项目「${rec.project}」的${rec.kind === "log" ? "自动记录" : "拍板记录"}写回失败了：${error}`,
+        );
+      }
+      return true;
+    }
+    if (rec.kind === "receipt" && run) {
+      if (conflicts.length) {
+        put(draft, "runs", run.id, { archive: "conflict" });
+        createCard(draft, {
+          key: `run:${run.id}:archive-conflict`,
+          kind: "ask",
+          title: `「${run.rule}」的档案写回有冲突`,
+          text:
+            `第 ${run.id} 轮基于旧版本写回：日志和决定已经合并，${conflicts.join("、")} 段没覆盖档案里更新的内容。` +
+            `被挡下的写回要不要重交，请本人确认。`,
+          options: ["以档案里现在的为准", "重新提交这次写回"],
+          recommend: 0,
+          about: "冲突的原文在那一轮的输出里；要重交先按档案最新版改好再触发新一轮。",
+          ...threadOf(run),
+          source: sourceOf(draft.view, run.id),
+          agent: run.agent,
+          run: run.id,
+        });
+      } else {
+        put(draft, "runs", run.id, { archive: "written" });
+      }
+    }
+    return true;
+  },
+  /** The push the shell ran after a write-back: which version the bucket now serves, or why it didn't. */
+  archivePushed(draft: Draft, project: string, given: Row) {
+    const row = draft.view.get("archives", project);
+    if (!row) return false;
+    put(draft, "archives", project, {
+      pushed: Number.isSafeInteger(given?.version) ? given.version : (row.pushed ?? null),
+      push_error: typeof given?.error === "string" ? given.error.slice(0, 300) : null,
+      pushed_at: draft.at,
+    });
+    return true;
+  },
   started(draft, id, token, given) {
     const { session, link } = given ?? {};
     for (const [field, value] of Object.entries({ session, link })) {

@@ -27,7 +27,7 @@ function lock() {
   };
 }
 
-/** secrets.env: what an adapter needs to check a webhook, kept out of rules.json. */
+/** secrets.env: webhook checks for the hub, archive bucket tokens for a worker that pulls read copies. */
 function loadSecrets() {
   const file = path.join(HOME, "secrets.env");
   if (existsSync(file)) process.loadEnvFile(file);
@@ -73,8 +73,8 @@ export async function up() {
   const stop = new AbortController();
   const jobs: Promise<unknown>[] = [];
   let close = () => {};
+  loadSecrets();
   if (config.hub) {
-    loadSecrets();
     const { host, port } = parseListen(config.hub.listen);
     process.env.AGENT_AUTOLOOP_PUBLIC_URL = config.hub.publicUrl ?? `http://${config.hub.listen}`;
     const { serve } = await import("./http.ts");
