@@ -4,6 +4,8 @@ import { chmodSync, existsSync, mkdirSync, renameSync, readFileSync, writeFileSy
 import { dirname } from "node:path";
 
 export const SEEN_CAP = 500;
+export const NOTIFIED_CAP = 500;
+export const SUPPRESSED_CAP = 100;
 
 export type PendingCard = {
   id: number;
@@ -15,15 +17,24 @@ export type PendingCard = {
   recommend: number | null;
 };
 
+/** A card the message policy chose not to push: kept so the suppression is auditable, not silent. */
+export type SuppressedEntry = { what: string; why: string; at: string };
+
 export type ChatState = {
   currentProject: string | null;
   seen: string[];
   cursor?: string;
   contextToken?: string | null;
+  /** When the newest context_token was captured — its age is what the platform measures. */
+  contextTokenAt?: string;
+  /** card:<id> → last version pushed to the owner: the idempotency key for outbound notifications. */
+  notified?: Record<string, { version: number; at: string }>;
+  /** Ring of policy-suppressed outbound items (cards and replies), newest last. */
+  suppressed?: SuppressedEntry[];
   cards: Record<string, PendingCard>;
 };
 
-const fresh = (): ChatState => ({ currentProject: null, seen: [], cards: {} });
+const fresh = (): ChatState => ({ currentProject: null, seen: [], notified: {}, suppressed: [], cards: {} });
 
 export function loadState(file: string): ChatState {
   if (!existsSync(file)) return fresh();
@@ -32,6 +43,8 @@ export function loadState(file: string): ChatState {
     state.seen ??= [];
     state.cards ??= {};
     state.currentProject ??= null;
+    state.notified ??= {};
+    state.suppressed ??= [];
     return state;
   } catch {
     renameSync(file, `${file}.corrupt`);
@@ -66,3 +79,30 @@ export function forgetCard(state: ChatState, id: number): void {
 }
 
 export const pendingList = (state: ChatState): PendingCard[] => Object.values(state.cards).sort((a, b) => a.id - b.id);
+
+/** True when this card at this version already went out — the idempotency check for card pushes. */
+export function alreadyNotified(state: ChatState, card: number, version: number): boolean {
+  const hit = state.notified?.[`card:${card}`];
+  return !!hit && hit.version >= version;
+}
+
+/** Called right after the platform takes the text — before the hub ack, so a crash can't send it twice. */
+export function markNotified(state: ChatState, card: number, version: number): void {
+  state.notified ??= {};
+  state.notified[`card:${card}`] = { version, at: new Date().toISOString() };
+  const keys = Object.keys(state.notified);
+  if (keys.length > NOTIFIED_CAP) {
+    keys
+      .map((key) => [key, state.notified![key].at] as const)
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .slice(0, keys.length - NOTIFIED_CAP)
+      .forEach(([key]) => delete state.notified![key]);
+  }
+}
+
+/** An outbound item the policy held back — the audit trail for "不推送也要留痕". */
+export function recordSuppressed(state: ChatState, what: string, why: string): void {
+  state.suppressed ??= [];
+  state.suppressed.push({ what, why, at: new Date().toISOString() });
+  if (state.suppressed.length > SUPPRESSED_CAP) state.suppressed.splice(0, state.suppressed.length - SUPPRESSED_CAP);
+}

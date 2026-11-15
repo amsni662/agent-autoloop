@@ -11,12 +11,33 @@ export const CHAT_COMMAND_TYPES = {
   "inventory-mbp": "ai-loop.inventory.mbp",
 } as const;
 
-export type ChatEvent = { id: string; type: string; subject?: string; summary?: string; detail?: string };
+export type ChatEvent = {
+  id: string;
+  type: string;
+  subject?: string;
+  summary?: string;
+  detail?: string;
+  /** Who sent the instruction — the gate's risk baseline keys off it. */
+  from?: string;
+};
 
-export function chatEvent(channel: string, messageId: string, action: Action, conversation: string): ChatEvent | null {
+export function chatEvent(
+  channel: string,
+  messageId: string,
+  action: Action,
+  conversation: string,
+  sender?: string,
+): ChatEvent | null {
   const id = `${channel}:${messageId}`;
+  const from = sender === undefined ? {} : { from: sender };
   if (action.kind === "command") {
-    return { id, type: CHAT_COMMAND_TYPES[action.command], subject: conversation, summary: `指令：${action.command}` };
+    return {
+      id,
+      type: CHAT_COMMAND_TYPES[action.command],
+      subject: conversation,
+      summary: `指令：${action.command}`,
+      ...from,
+    };
   }
   if (action.kind === "task") {
     return {
@@ -25,6 +46,7 @@ export function chatEvent(channel: string, messageId: string, action: Action, co
       subject: action.project,
       summary: [...action.requirement].slice(0, 200).join(""),
       detail: action.requirement,
+      ...from,
     };
   }
   return null;

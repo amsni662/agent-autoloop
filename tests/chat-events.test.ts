@@ -45,3 +45,19 @@ test("长要求：summary 截断、detail 留全文；非法字符不进 subject
   assert.ok([...event!.summary!].length <= 200);
   assert.equal(event!.detail, long);
 });
+
+test("事件带上发信人：gate 按真实发信人核身，不是通道名义", () => {
+  const task = chatEvent(
+    "wechat",
+    "m10",
+    { kind: "task", project: "ai-loop", requirement: "跑下测试" },
+    "chat",
+    "me@im.wechat",
+  );
+  assert.equal(task!.from, "me@im.wechat");
+  const command = chatEvent("feishu", "om_y", { kind: "command", command: "status" }, "oc_1", "ou_owner");
+  assert.equal(command!.from, "ou_owner");
+  // 没拿到发信人的场合不编一个——字段留空比写错强。
+  const noSender = chatEvent("wechat", "m11", { kind: "command", command: "usage" }, "chat");
+  assert.equal(noSender!.from, undefined);
+});

@@ -2,8 +2,18 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import type { PolicyRule } from "./notify.ts";
 
 export type Features = { intake: boolean; notify: boolean; answers: boolean };
+/** The outbound message policy, from the config file's `policy` section (see adapters/chat/notify.ts). */
+export type PolicyConfig = {
+  /** Whole-category switches: set one false to silence that class without touching the rule table. */
+  send?: { decide?: boolean; result?: boolean };
+  /** Extra mapping rules, tried before the built-in table — first match wins. */
+  rules?: PolicyRule[];
+  /** WeChat only: refuse sends when the reply credential is older than this — the platform accepts but never delivers. */
+  tokenMaxAgeMs?: number;
+};
 export type ChatConfig = {
   hub: string;
   /** The only sender the adapter serves: a Feishu open_id or a WeChat userId. */
@@ -12,6 +22,7 @@ export type ChatConfig = {
   rulesFile: string;
   stateFile: string;
   features: Features;
+  policy?: PolicyConfig;
   /** Feishu only: path to lark-cli. */
   lark?: string;
   /** WeChat only: the iLink binding profile (token, userId, baseUrl). */
@@ -44,6 +55,10 @@ export function loadConfig(file: string): ChatConfig {
   };
   for (const field of ["lark", "accountFile"] as const) {
     if (typeof given[field] === "string") config[field] = expand(given[field]);
+  }
+  if (given.policy !== undefined) {
+    if (typeof given.policy !== "object" || given.policy === null) throw new Error(`配置 ${file} 的 policy 要写成对象`);
+    config.policy = given.policy as PolicyConfig;
   }
   for (const [field, value] of Object.entries(config)) {
     if (field.endsWith("File") && typeof value === "string" && !isAbsolute(value)) {

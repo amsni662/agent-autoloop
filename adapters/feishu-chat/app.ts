@@ -6,6 +6,7 @@ import { hubClient, HubError } from "../../protocol/client.ts";
 import { loadConfig, loadKeys, type ChatConfig } from "../chat/config.ts";
 import { loadState, markSeen, saveState, type ChatState } from "../chat/state.ts";
 import { handleText } from "../chat/act.ts";
+import { sanitize } from "../chat/notify.ts";
 
 const exec = promisify(execFile);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -31,6 +32,8 @@ export async function createFeishuApp(opts: FeishuOpts) {
   const channel = hubClient(config.hub, keys.channel);
 
   let sentKey = 0;
+  // The boot nonce keeps a restarted process from reusing the same idempotency keys for different texts.
+  const boot = Math.random().toString(36).slice(2, 8);
   const send = async (text: string) => {
     if (!config.features.notify) {
       log(`（发通知关着）${text.slice(0, 60)}`);
@@ -49,9 +52,9 @@ export async function createFeishuApp(opts: FeishuOpts) {
           "--msg-type",
           "text",
           "--idempotency-key",
-          `chat-reply-${sentKey++}`,
+          `chat-reply-${boot}-${sentKey++}`,
           "--content",
-          JSON.stringify({ text }),
+          JSON.stringify({ text: sanitize(text) }),
         ],
         { env: opts.env ?? process.env },
       );

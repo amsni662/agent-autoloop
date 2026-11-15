@@ -35,8 +35,14 @@ const HELP = {
 
 export const helpText = (numbered: boolean) => (numbered ? HELP.numbered : HELP.unnumbered);
 
-async function dispatch(deps: ChatDeps, action: Action, conversation: string, msgId: string): Promise<void> {
-  const event = chatEvent(deps.channelName, msgId, action, conversation);
+async function dispatch(
+  deps: ChatDeps,
+  action: Action,
+  conversation: string,
+  msgId: string,
+  sender: string,
+): Promise<void> {
+  const event = chatEvent(deps.channelName, msgId, action, conversation, sender);
   if (!event) return;
   const ack = (await deps.source.event(event)) as { duplicate?: boolean; routed?: string[] };
   if (ack.duplicate) {
@@ -44,7 +50,7 @@ async function dispatch(deps: ChatDeps, action: Action, conversation: string, ms
     return;
   }
   await deps.send(
-    ack.routed?.length ? `已派给「${ack.routed.join("」「")}」` : `中台收到了，但没有规则接「${event.type}」`,
+    ack.routed?.length ? `已派给「${ack.routed.join("」「")}」` : "中台收到了，但这句没有规矩接，没派出去。",
   );
 }
 
@@ -77,10 +83,11 @@ async function submitAnswer(deps: ChatDeps, action: Extract<Action, { kind: "ans
   }
 }
 
+/** Handles one inbound text; returns the action kind so the caller can decide follow-ups (e.g. pending hints). */
 export async function handleText(
   deps: ChatDeps,
   opts: { msgId: string; conversation: string; sender: string; text: string },
-): Promise<void> {
+): Promise<Action["kind"]> {
   const { msgId, conversation, sender, text } = opts;
   const projects: Project[] = loadProjects(deps.config.rulesFile);
   const action = parseMessage(text, {
@@ -93,58 +100,73 @@ export async function handleText(
 
   switch (action.kind) {
     case "ignore":
-      return;
+      break;
     case "command":
     case "task":
-      return dispatch(deps, action, conversation, msgId);
+      await dispatch(deps, action, conversation, msgId, sender);
+      break;
     case "help":
-      return deps.send(helpText(deps.numbered));
+      await deps.send(helpText(deps.numbered));
+      break;
     case "projects":
-      return deps.send(describeProjects(projects, deps.state.currentProject));
+      await deps.send(describeProjects(projects, deps.state.currentProject));
+      break;
     case "switch":
       deps.state.currentProject = action.project;
       deps.save();
-      return deps.send(`当前项目：${projects.find((p) => p.id === action.project)?.name ?? action.project}`);
+      await deps.send(`当前项目：${projects.find((p) => p.id === action.project)?.name ?? action.project}`);
+      break;
     case "no-project":
-      return deps.send(
-        `没说给哪个项目。\n${describeProjects(projects, null)}\n写「<项目>：<要求>」或先「切到 <项目>」`,
-      );
+      await deps.send(`没说给哪个项目。\n${describeProjects(projects, null)}\n写「<项目>：<要求>」或先「切到 <项目>」`);
+      break;
     case "unknown-project":
-      return deps.send(`没登记的项目「${action.name}」。\n${describeProjects(projects, deps.state.currentProject)}`);
+      await deps.send(`没登记的项目「${action.name}」。\n${describeProjects(projects, deps.state.currentProject)}`);
+      break;
     case "answer":
-      return submitAnswer(deps, action, sender);
+      await submitAnswer(deps, action, sender);
+      break;
     case "answer-hint": {
-      if (!deps.config.features.answers) return deps.send("拍板功能没开，回答没交");
+      if (!deps.config.features.answers) {
+        await deps.send("拍板功能没开，回答没交");
+        break;
+      }
       const pending = pendingList(deps.state);
       switch (action.reason) {
         case "needs-id":
-          return deps.send(
+          await deps.send(
             `有 ${pending.length} 张卡片等你拍板（${pending.map((c) => `#${c.id}`).join("、")}），写「#卡片号 <序号或一句话>」`,
           );
+          break;
         case "no-such-card":
-          return deps.send(
+          await deps.send(
             `没有待拍板的卡片 #${action.card}${pending.length ? `（在等：${pending.map((c) => `#${c.id}`).join("、")}）` : ""}`,
           );
+          break;
         case "out-of-range": {
           const card = pending.find((c) => c.id === action.card);
-          return deps.send(`卡片 #${action.card} 没有这项（共 ${card?.options ?? "?"} 项）`);
+          await deps.send(`卡片 #${action.card} 没有这项（共 ${card?.options ?? "?"} 项）`);
+          break;
         }
         case "unnumbered":
-          return deps.send(
+          await deps.send(
             "这里拍板：点卡片上的按钮、在卡片里的文字框写回答，或引用回复卡片消息写「#卡片号 <序号或一句话>」",
           );
+          break;
         case "empty-task":
-          return deps.send("要求没写。写「<项目>：<要求>」或「@<项目> <要求>」");
+          await deps.send("要求没写。写「<项目>：<要求>」或「@<项目> <要求>」");
+          break;
         case "show-card": {
           const card = pending.find((c) => c.id === action.card);
-          return deps.send(
+          await deps.send(
             card
               ? `卡片 #${card.id}「${card.title}」共 ${card.options} 项，写「#${card.id} <序号或一句话>」`
               : `没有待拍板的卡片 #${action.card}`,
           );
+          break;
         }
       }
-      return;
+      break;
     }
   }
+  return action.kind;
 }
