@@ -12,7 +12,7 @@ const VIEWS = {
   events: "id source key type subject summary detail link routed paused received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
-    "claimed_at seen_at finished_at manual summary error usage diagnosis rules_version",
+    "claimed_at seen_at finished_at manual summary error usage diagnosis rules_version archive",
   run_events: "run_id event_id",
   cards:
     "id key kind title text detail options recommend about state fyi quiet choice answer by result rule lane grp source " +
@@ -26,11 +26,16 @@ const VIEWS = {
   model_holds: "model until reason by run at",
   usage: "device date agent model source input output cache_read cache_write runs at",
   quotas: "device provider account plan window used_pct resets_at at",
+  archives: "project version summary commit:head pushed push_error pushed_at updated_at",
+  archive_writes: "key project kind run by payload state marker claimed_at created_at",
 };
 
 /** Made anew at every start, so changing them takes no rebuild and no migration. */
 export const viewStatements = Object.entries(VIEWS).map(([table, columns]) => {
-  const selected = columns.split(" ").map((column) => `json_extract(data,'$.${column}') AS ${column}`);
+  const selected = columns.split(" ").map((column) => {
+    const [field, alias] = column.split(":");
+    return `json_extract(data,'$.${field}') AS ${alias ?? field}`;
+  });
   return `DROP VIEW IF EXISTS ${table}; CREATE VIEW ${table} AS SELECT ${selected.join(",")} FROM projections WHERE collection='${table}'`;
 });
 

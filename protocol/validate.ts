@@ -25,6 +25,17 @@ export function addUsage(total: Usage | undefined, more: Usage | undefined): Usa
     if (more[field] !== undefined) result[field] = (result[field] ?? 0) + more[field];
   return result;
 }
+/** 一条档案写回条目：一行文字，或带日期的 {text, at?}。 */
+export type ArchiveEntry = string | { text: string; at?: string };
+
+/** 回执的 archive 段：在领活读到的版本（base）上写回。状态在落后的 base 上会被拒，日志和决定照样合并。 */
+export type ArchiveWriteBack = {
+  base: number;
+  log?: ArchiveEntry[];
+  status?: string;
+  decisions?: ArchiveEntry[];
+};
+
 export type Result = {
   outcome: "done" | "nothing" | "failed" | "cancelled";
   summary?: string;
@@ -38,6 +49,7 @@ export type Result = {
   resolve?: { card: number; reason: string }[];
   later?: Later[];
   events?: EventInput[];
+  archive?: ArchiveWriteBack;
 };
 export type Rejected = { card?: number; what?: string; reason: string };
 
@@ -152,6 +164,25 @@ const validLater = (later: Item) =>
     ? later.at === undefined
     : dateTime(later.at) && text(later.about, 4000) && later.cancel === undefined);
 
+const validArchiveEntry = (entry: unknown) =>
+  text(entry, 2000) ||
+  (isItem(entry) &&
+    only(entry as Item, ["text", "at"]) &&
+    text((entry as Item).text, 2000) &&
+    ((entry as Item).at === undefined || dateTime((entry as Item).at)));
+
+const validArchive = (archive: Item) =>
+  only(archive, ["base", "log", "status", "decisions"]) &&
+  Number.isSafeInteger(archive.base) &&
+  (archive.base as number) >= 0 &&
+  (archive.log === undefined ||
+    (Array.isArray(archive.log) && archive.log.length <= 20 && archive.log.every(validArchiveEntry))) &&
+  (archive.decisions === undefined ||
+    (Array.isArray(archive.decisions) &&
+      archive.decisions.length <= 20 &&
+      archive.decisions.every(validArchiveEntry))) &&
+  optional(archive.status, 20000);
+
 const validDiagnosis = (diagnosis: Item) =>
   only(diagnosis, ["category", "explain", "device", "agent", "model", "next", "waitUntil", "raw", "output"]) &&
   typeof diagnosis.category === "string" &&
@@ -190,6 +221,7 @@ export function parseResult(input: unknown): Result {
       "resolve",
       "later",
       "events",
+      "archive",
     ])
   ) {
     throw new InputError("结果里有不认识的字段");
@@ -217,6 +249,12 @@ export function parseResult(input: unknown): Result {
   if (result.events !== undefined) {
     if (!items(result.events, 100)) throw new InputError("events 最多 100 项");
     result.events = result.events.map(parseEvent);
+  }
+  if (result.archive !== undefined && !(isItem(result.archive) && validArchive(result.archive as Item))) {
+    throw new InputError(
+      "archive 要带读到的版本号 base（非负整数），只收 base、log、status、decisions；" +
+        "log、decisions 每项最多 20 条、一条 2000 字以内，status 最多 20000 字",
+    );
   }
   return result as Result;
 }

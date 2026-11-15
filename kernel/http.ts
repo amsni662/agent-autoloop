@@ -21,6 +21,8 @@ export type Services = {
   skipped(rule: string, since: string, everything?: boolean): { count: number; events: Row[] };
   why(id: number): unknown;
   card(token: string): Row | undefined;
+  /** A project's archive as the hub knows it, or one version of it: what a worker caches by version. */
+  archive(project: string, version?: number): unknown;
   wait(until: number, signal: AbortSignal): Promise<void>;
   stream(after: number, signal: AbortSignal, key: string): ReadableStream;
   adapt(source: string, headers: Headers, body: string): Promise<unknown[]>;
@@ -325,6 +327,16 @@ async function route(call: Call): Promise<Response> {
   }
   if (method === "POST" && path === "/v1/tell") return tell(call);
   if (method === "GET" && path === "/v1/work") return work(call);
+  const archive = /^\/v1\/archive\/([a-z][a-z0-9-]*)$/.exec(path);
+  if (method === "GET" && archive) {
+    requireKey(call, "worker");
+    const wanted = call.url.searchParams.get("version");
+    const version = wanted === null ? undefined : Number(wanted);
+    if (version !== undefined && !(Number.isSafeInteger(version) && version >= 0)) {
+      throw new InputError("version 要是非负整数");
+    }
+    return json(call.services.archive(archive[1], version));
+  }
   const [, runPart, action] = /^\/v1\/runs\/([1-9][0-9]*)\/(started|result|cancel|why)$/.exec(path) ?? [];
   const runId = Number(runPart);
   if (method === "GET" && action === "why") {

@@ -132,17 +132,17 @@ test("push mirrors the whole archive including .git; pull reproduces it and old 
 
   const pushed = await sync.pushArchive("app", { root, s3: bucket.cfg });
   assert.ok(pushed.sent > 5, `sent ${pushed.sent} objects`);
+  assert.equal(pushed.version, 2);
   const keys = [...bucket.objects.keys()];
-  assert.ok(keys.includes("archive/app/档案.json"));
-  assert.ok(keys.includes("archive/app/状态.md"));
+  assert.ok(keys.includes("archive/app/v2/档案.json"), "the whole version sits under v2/");
+  assert.ok(keys.includes("archive/app/v2/状态.md"));
   assert.ok(
-    keys.some((k) => k.startsWith("archive/app/.git/")),
+    keys.some((k) => k.startsWith("archive/app/v2/.git/")),
     "the repository itself goes up",
   );
-  assert.ok(
-    keys.some((k) => k.includes("/refs/tags/v2") || k.includes("v2")),
-    "version tags go up",
-  );
+  const pointer = JSON.parse(bucket.objects.get("archive/app/current.json")!.toString("utf8"));
+  assert.equal(pointer.version, 2, "the pointer names the published version");
+  assert.equal(pointer.head, store.readArchive("app", root).commit);
 
   const again = await sync.pushArchive("app", { root, s3: bucket.cfg });
   assert.equal(again.sent, 0, "unchanged objects are not re-sent");

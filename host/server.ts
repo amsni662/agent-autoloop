@@ -4,6 +4,7 @@ import { realpathSync, watch } from "node:fs";
 import { basename, dirname } from "node:path";
 import { RULES_FILE } from "./home.ts";
 import { loadPlugin } from "./plugins.ts";
+import { createArchiveSidecar } from "./archive.ts";
 import * as hub from "./runtime.ts";
 import { AuthError, NotFound } from "../kernel/errors.ts";
 import { createHandler } from "../kernel/http.ts";
@@ -98,11 +99,13 @@ export function makeHandler(commit = "dev") {
     if (!Number.isFinite(next)) return;
     timer = setTimeout(fire, Math.max(0, Math.min(LONGEST_TIMER, next - Date.now())));
   };
+  const archiver = createArchiveSidecar(hub);
   const unlisten = hub.onChange((type, facts) => {
     // Being seen wakes nobody, unless it changed a card.
     const justSeen = type === "heartbeat" || type === "channelSeen";
     if (!justSeen || facts.some((fact) => fact.changes.some((change) => change.table === "cards"))) wake();
     arm();
+    if (facts.some((fact) => fact.changes.some((change) => change.table === "archive_writes"))) archiver.kick();
   });
   // libuv 1.52 (Node 24.16+) on Windows asserts and exits on the first change in a folder named through an 8.3 short name.
   const watcher = watch(realpathSync.native(dirname(RULES_FILE)), (_event, file) => {
@@ -113,12 +116,14 @@ export function makeHandler(commit = "dev") {
     now: Date.now,
     view: hub.getView,
     environment: hub.environment,
-    dispatch: hub.execute,
+    // Every claim carries what the archives on disk say, so a job can point at a version.
+    dispatch: (type, args, now) => hub.execute(type, type === "claimNext" ? [...args, archiver.snapshot()] : args, now),
     state: hub.stateOf,
     usage: hub.usageView,
     skipped: hub.skipped,
     why: hub.why,
     card: hub.cardByToken,
+    archive: archiver.archive,
     wait(until, signal) {
       return new Promise((resolve) => {
         const waiter = {
@@ -139,6 +144,8 @@ export function makeHandler(commit = "dev") {
     adapt: adaptWebhook,
   });
   fire();
+  // Writes left pending by a shutdown — a receipt acknowledged but not yet in the archive — get picked up here.
+  archiver.kick();
   return {
     handle,
     close() {
@@ -146,6 +153,7 @@ export function makeHandler(commit = "dev") {
       clearTimeout(timer);
       watcher.close();
       unlisten();
+      archiver.close();
       wake();
     },
   };

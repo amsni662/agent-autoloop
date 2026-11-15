@@ -48,6 +48,61 @@
         "minimum": 0
       }
     },
+    "archive-entry": {
+      "oneOf": [
+        {
+          "type": "string",
+          "maxLength": 2000,
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "maxLength": 2000,
+              "minLength": 1
+            },
+            "at": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "(Z|[+-]\\d\\d:\\d\\d)$"
+            }
+          },
+          "required": ["text"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "archive-write": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "log": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/archive-entry"
+          },
+          "maxItems": 20
+        },
+        "status": {
+          "type": "string",
+          "maxLength": 20000
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/archive-entry"
+          },
+          "maxItems": 20
+        }
+      },
+      "required": ["base"],
+      "additionalProperties": false
+    },
     "ask": {
       "type": "object",
       "properties": {
@@ -354,6 +409,9 @@
             "$ref": "#/$defs/event"
           },
           "maxItems": 100
+        },
+        "archive": {
+          "$ref": "#/$defs/archive-write"
         }
       },
       "required": ["outcome"],
@@ -631,6 +689,27 @@
           "items": {
             "type": "string"
           }
+        },
+        "archive": {
+          "type": "object",
+          "properties": {
+            "project": {
+              "type": "string"
+            },
+            "address": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "summary": {
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          "required": ["project", "address", "version", "summary"],
+          "additionalProperties": true
         }
       },
       "required": ["run", "token", "attempt", "rule", "agent", "session", "askFirst", "context"],

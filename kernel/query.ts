@@ -125,8 +125,20 @@ export function cardView(card: Row, env: Environment, ref: string | null = null,
 
 export function jobOf(view: View, run: Row, env: Environment): Job {
   const rules = configuration(view, run.rules_version);
-  const { name, cwd, skill, prompt, title, emits } = ruleOf(rules, run.rule)!;
+  const { name, cwd, skill, prompt, title, emits, project } = ruleOf(rules, run.rule)!;
   const { maxActive: _maxActive, ...agent } = rules.agents[run.agent];
+  const archive = project
+    ? (() => {
+        const registered = rules.projects?.[project];
+        const snapshot = view.get("archives", project);
+        return {
+          project,
+          address: registered?.archive ?? `archive/${project}`,
+          version: snapshot?.version ?? 0,
+          summary: snapshot?.summary ?? "",
+        };
+      })()
+    : undefined;
   const events = eventsOf(view, run.id);
   const eventIds = events.map((event) => event.id);
   const thread = { rule: run.rule, lane: run.lane };
@@ -146,6 +158,7 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     agent: { ...agent, id: run.agent },
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
+    ...(archive && { archive }),
     context: {
       events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
         const sourceName = rules.sources[source]?.name ?? source;

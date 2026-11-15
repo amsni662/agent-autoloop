@@ -39,16 +39,61 @@ export function headCommit(dir: string): string {
   return git(dir, ["rev-parse", "HEAD"]).trim();
 }
 
-/** Everything staged in one commit; empty when nothing changed. */
-export function commitAll(dir: string, message: string): string | null {
+/** Everything staged in one commit; empty when nothing changed. `trailer` becomes the commit body (dedup keys). */
+export function commitAll(dir: string, message: string, trailer?: string): string | null {
   git(dir, ["add", "-A"]);
   if (git(dir, ["status", "--porcelain"]).trim() === "") return null;
-  git(dir, ["commit", "-m", message]);
+  git(dir, ["commit", "-m", message, ...(trailer ? ["-m", trailer] : [])]);
   return headCommit(dir);
 }
 
 export function tag(dir: string, name: string) {
   git(dir, ["tag", name]);
+}
+
+/** Uncommitted changes, one per line; empty when the tree is clean. */
+export function status(dir: string): string {
+  return git(dir, ["status", "--porcelain"]).trim();
+}
+
+export function resetHard(dir: string, ref: string) {
+  git(dir, ["reset", "--hard", ref]);
+}
+
+/** Remove untracked files; ignored files (档案.json) stay. */
+export function clean(dir: string) {
+  git(dir, ["clean", "-fd"]);
+}
+
+/** Whether `a` is an ancestor commit of `b`. */
+export function isAncestor(dir: string, a: string, b: string): boolean {
+  const ran = spawnSync("git", ["-C", dir, "merge-base", "--is-ancestor", a, b], {
+    env: { ...process.env, ...IDENTITY },
+  });
+  return ran.status === 0;
+}
+
+/** Every version tag and the commit it points at: { "v3": "abc…" }. */
+export function tagCommits(dir: string): Record<string, string> {
+  const out = git(dir, ["for-each-ref", "refs/tags", "--format=%(refname:short)%00%(objectname)"]).trim();
+  const found: Record<string, string> = {};
+  for (const line of out ? out.split("\n") : []) {
+    const [name, commit] = line.split("\0");
+    found[name] = commit;
+  }
+  return found;
+}
+
+/** Each commit's hash and full message body, oldest first: for rebuilding the dedup map after a crash. */
+export function commitBodies(dir: string): { hash: string; body: string }[] {
+  const out = git(dir, ["log", "--reverse", "--format=%H%x00%B%x01"]);
+  const found: { hash: string; body: string }[] = [];
+  for (const part of out.split("\x01")) {
+    if (!part.trim()) continue;
+    const [hash, ...rest] = part.trimStart().split("\0");
+    found.push({ hash, body: rest.join("\0") });
+  }
+  return found;
 }
 
 /** The commit a ref points at, or null when it doesn't exist. */
