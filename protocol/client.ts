@@ -75,6 +75,10 @@ export function hubClient(url: string, key: string) {
       call("POST", `/v1/rules/${encodeURIComponent(rule)}/run`, { body }),
     replay: (rule: string, body: { since: string }) =>
       call("POST", `/v1/rules/${encodeURIComponent(rule)}/replay`, { body }),
+    // Device control: taking a worker off duty or bringing it back, each a fact in the log.
+    drainWorker: (worker: string, body: { reason?: string } = {}) =>
+      call("POST", `/v1/workers/${encodeURIComponent(worker)}/drain`, { body }),
+    resumeWorker: (worker: string) => call("POST", `/v1/workers/${encodeURIComponent(worker)}/resume`, { body: {} }),
   };
 }
 export type Hub = ReturnType<typeof hubClient>;

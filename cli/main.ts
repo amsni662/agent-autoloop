@@ -58,6 +58,9 @@ const HELP = `Agent 自动化中台
                                     补跑这条规则从这个时间起暂停时跳过的事件，每条只补一次
   agent-autoloop run <规则> [--subject 对象] [--reason 说明]
                                     立即运行一轮，照常排队派活
+  agent-autoloop drain <设备> [--reason 原因]
+                                    下架一台接单程序：做完手上的，不再领新活
+  agent-autoloop undrain <设备>          恢复一台接单程序接单
   agent-autoloop emit <类型> [--dry-run] [--subject x] [--summary x] [--detail x] [--link x] [--id x] [--key 来源密钥]
                                     发一条事件；--dry-run 只预演会派给谁，不连接中台
   agent-autoloop tell <编号> [--task 定时任务名]
@@ -157,6 +160,7 @@ rules.json 里这个定时任务要写 cwd；你答了，中台叫醒它的 Agen
   check: { flags: [], usage: "用法：agent-autoloop check [文件]" },
   conformance: { flags: ["config"], usage: "用法：agent-autoloop conformance <测试中台地址> --config <测试凭据文件>" },
   doctor: { flags: [], usage: "用法：agent-autoloop doctor" },
+  drain: { flags: ["reason"], usage: "用法：agent-autoloop drain <设备> [--reason 原因]" },
   emit: {
     flags: ["dry-run", "subject", "summary", "detail", "link", "id", "key"],
     usage:
@@ -194,6 +198,7 @@ rules.json 里这个定时任务要写 cwd；你答了，中台叫醒它的 Agen
   stop: { flags: [], usage: "用法：agent-autoloop stop <第几轮>" },
   tell: { flags: ["task"], usage: "用法：agent-autoloop tell <编号> [--task 定时任务名]，内容从标准输入读" },
   try: { flags: [], usage: TRY_USAGE },
+  undrain: { flags: [], usage: "用法：agent-autoloop undrain <设备>" },
   uninstall: { flags: ["yes"], usage: UNINSTALL_USAGE },
   usage: { flags: ["days", "device", "json"], usage: USAGE_CMD_USAGE },
   up: { flags: [], usage: "用法：agent-autoloop up" },
@@ -629,6 +634,32 @@ async function runNow(args: string[]) {
   console.log(`排上了：第 ${done.run} 轮。`);
 }
 
+async function drain(args: string[]) {
+  const { named, rest } = flags(args);
+  if (!rest[0]) return fail(TAKES.drain.usage);
+  const body = { ...(text(named.reason) && { reason: text(named.reason) }) };
+  const done = await ownerClient().drainWorker(rest[0], body);
+  const lines = [
+    done.changed
+      ? `下架了「${done.worker}」：不再领新活，手上的照做、回执照收。`
+      : `「${done.worker}」本来就在下架中。`,
+  ];
+  if (done.inHand) lines.push(`手上还有 ${done.inHand} 轮在做，做完就停。`);
+  if (done.queued) {
+    lines.push(
+      `还有 ${done.queued} 轮排着等它的固定 Agent，改派不了——要它做就先 agent-autoloop undrain ${done.worker}，要换设备就改 rules.json 里 Agent 的 worker。`,
+    );
+  }
+  console.log(lines.join("\n"));
+}
+
+async function undrain(args: string[]) {
+  const { rest } = flags(args);
+  if (!rest[0]) return fail(TAKES.undrain.usage);
+  const done = await ownerClient().resumeWorker(rest[0]);
+  console.log(done.changed ? `恢复了「${done.worker}」，可以重新领活。` : `「${done.worker}」本来就没在下架。`);
+}
+
 async function doctor() {
   let bad = 0;
   const say = (ok: boolean, words: string) => {
@@ -960,6 +991,8 @@ const commands: Record<string, () => unknown> = {
   resume: () => resume(args),
   replay: () => replay(args),
   run: () => runNow(args),
+  drain: () => drain(args),
+  undrain: () => undrain(args),
   key: () => key(args),
   emit: () => emit(args),
   tell: () => tell(args),

@@ -20,6 +20,7 @@ export const TABLES = [
   "archives",
   "archive_writes",
   "gates",
+  "drains",
 ] as const;
 export type Table = (typeof TABLES)[number];
 export type Change = { table: Table; key: string; row: Row | null };
