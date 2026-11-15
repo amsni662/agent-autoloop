@@ -5,7 +5,7 @@ import { HubError, type Hub } from "../../protocol/client.ts";
 import { describeProjects, loadProjects, type Project } from "./projects.ts";
 import { chatEvent } from "./events.ts";
 import { parseMessage, type Action } from "./parse.ts";
-import { pendingList, type ChatState, type PendingCard } from "./state.ts";
+import { knownCards, pendingList, settleCard, type ChatState } from "./state.ts";
 import type { ChatConfig } from "./config.ts";
 
 export type ChatDeps = {
@@ -70,14 +70,17 @@ async function submitAnswer(deps: ChatDeps, action: Extract<Action, { kind: "ans
   else body.text = action.text;
   try {
     const result = (await deps.channel.answer(action.card, body)) as { changed: boolean; state: string };
+    // Either way the card isn't open anymore: settle it out of the pending counts while keeping the
+    // entry (and its ref) so a repeat answer still earns "already decided" until the hub's decided
+    // re-offer drops the entry for good.
+    settleCard(deps.state, action.card);
+    deps.save();
     if (!result.changed) {
       await deps.send(`卡片 #${action.card} 已经定过了`);
     } else {
       const what = body.text ?? `第 ${(body.choice ?? 0) + 1} 项`;
       await deps.send(`已记下：${what}`);
     }
-    // Keep the index entry until the hub reoffers the card in its decided state — a duplicate answer before then
-    // still reaches the kernel and gets the honest "already decided", not "no such card".
   } catch (error) {
     await deps.send(`这个回答没被收下：${error instanceof HubError ? error.message : String(error)}`);
   }
@@ -93,7 +96,12 @@ export async function handleText(
   const action = parseMessage(text, {
     projects,
     current: deps.state.currentProject,
-    pending: pendingList(deps.state).map(({ id, options, kind }) => ({ id, options, kind })),
+    pending: knownCards(deps.state).map(({ id, options, kind, state }) => ({
+      id,
+      options,
+      kind,
+      open: state !== "settled",
+    })),
     numbered: deps.numbered,
   });
   deps.log(`${msgId} → ${action.kind}`);
@@ -143,7 +151,7 @@ export async function handleText(
           );
           break;
         case "out-of-range": {
-          const card = pending.find((c) => c.id === action.card);
+          const card = pending.find((c) => c.id === action.card) ?? deps.state.cards[String(action.card)];
           await deps.send(`卡片 #${action.card} 没有这项（共 ${card?.options ?? "?"} 项）`);
           break;
         }
@@ -156,11 +164,13 @@ export async function handleText(
           await deps.send("要求没写。写「<项目>：<要求>」或「@<项目> <要求>」");
           break;
         case "show-card": {
-          const card = pending.find((c) => c.id === action.card);
+          const card = deps.state.cards[String(action.card)];
           await deps.send(
-            card
-              ? `卡片 #${card.id}「${card.title}」共 ${card.options} 项，写「#${card.id} <序号或一句话>」`
-              : `没有待拍板的卡片 #${action.card}`,
+            !card
+              ? `没有待拍板的卡片 #${action.card}`
+              : card.state === "settled"
+                ? `卡片 #${card.id} 已经定过了`
+                : `卡片 #${card.id}「${card.title}」共 ${card.options} 项，写「#${card.id} <序号或一句话>」`,
           );
           break;
         }

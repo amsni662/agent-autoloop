@@ -15,6 +15,8 @@ export type PendingCard = {
   kind: string;
   title: string;
   recommend: number | null;
+  /** "settled" keeps the ref so a repeat answer earns the honest "already decided"; pendingList skips it. */
+  state?: "settled";
 };
 
 /** A card the message policy chose not to push: kept so the suppression is auditable, not silent. */
@@ -78,7 +80,20 @@ export function forgetCard(state: ChatState, id: number): void {
   delete state.cards[String(id)];
 }
 
-export const pendingList = (state: ChatState): PendingCard[] => Object.values(state.cards).sort((a, b) => a.id - b.id);
+/** Marks a card decided — it leaves pendingList but stays findable so "#<号>" can still name it. */
+export function settleCard(state: ChatState, id: number): void {
+  const card = state.cards[String(id)];
+  if (card) card.state = "settled";
+}
+
+/** Open cards only — what bare answers and "等你拍板" counts may see. */
+export const pendingList = (state: ChatState): PendingCard[] =>
+  Object.values(state.cards)
+    .filter((card) => card.state !== "settled")
+    .sort((a, b) => a.id - b.id);
+
+/** Every remembered card, settled included — "#<号>" needs them for the honest "already decided". */
+export const knownCards = (state: ChatState): PendingCard[] => Object.values(state.cards).sort((a, b) => a.id - b.id);
 
 /** True when this card at this version already went out — the idempotency check for card pushes. */
 export function alreadyNotified(state: ChatState, card: number, version: number): boolean {

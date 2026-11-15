@@ -10,12 +10,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   forgetCard,
+  knownCards,
   loadState,
   markSeen,
   pendingList,
   rememberCard,
   saveState,
   SEEN_CAP,
+  settleCard,
 } from "../adapters/chat/state.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "chat-state-"));
@@ -57,6 +59,39 @@ test("卡片索引：关掉/定掉的卡片不再算待拍板", () => {
   forgetCard(state, 5);
   assert.deepEqual(
     pendingList(state).map((c) => c.id),
+    [6],
+  );
+});
+
+test("定过的卡离开待拍板、留在索引里：重复拍板还能得「已经定过了」，中枢重投已决版才彻底忘掉", () => {
+  const state = loadState(join(dir, "settled.json"));
+  rememberCard(state, { id: 5, ref: "r1", options: 2, kind: "ask", title: "a", recommend: null });
+  rememberCard(state, { id: 6, ref: "r2", options: 2, kind: "ask", title: "b", recommend: null });
+  settleCard(state, 5);
+  assert.deepEqual(
+    pendingList(state).map((c) => c.id),
+    [6],
+    "定过的卡不能再算「等你拍板」",
+  );
+  assert.deepEqual(
+    knownCards(state).map((c) => c.id),
+    [5, 6],
+    "索引还要留它：#5 再答要给「已经定过了」而不是「没有这张卡」",
+  );
+  // 重启后状态文件照样分得清待答和已定。
+  saveState(join(dir, "settled.json"), state);
+  const again = loadState(join(dir, "settled.json"));
+  assert.deepEqual(
+    pendingList(again).map((c) => c.id),
+    [6],
+  );
+  assert.deepEqual(
+    knownCards(again).map((c) => c.id),
+    [5, 6],
+  );
+  forgetCard(again, 5);
+  assert.deepEqual(
+    knownCards(again).map((c) => c.id),
     [6],
   );
 });

@@ -132,7 +132,7 @@ export function sanitize(raw: string, max = MAX_TEXT): string {
     .replace(/^[ \t]*"(?:[^"\\]|\\.)*"[ \t]*:[ \t]*(?:"[^"\n]*"|-?[\d.eE+-]+|true|false|null|[[{])[ \t]*$/gm, "");
   for (let i = 0; i < 3; i++) out = out.replace(/\{[^{}\n]*\}/g, "（报文略）");
   out = out
-    .replace(/\b[ST]\d{1,3}\b/g, "（编号略）")
+    .replace(/\b[ST]\d{1,3}(?:r\d+)?\b/g, "（编号略）")
     .replace(/第\s*\d+\s*轮/g, "（编号略）")
     .replace(/\b(?:run|event|session|card)[ _:-]?\d+\b/gi, "（编号略）")
     .replace(
