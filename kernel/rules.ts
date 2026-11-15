@@ -53,6 +53,12 @@ type Registered = {
   channels: Record<string, Channel>;
   projects?: Record<string, Project>;
 };
+/** The role catalog as the shell hands it in: each role an ordered chain of candidates. `device`, `model` and `when`
+ * are for people to read; dispatch looks the candidate's agent up in the rules and takes its worker and model there. */
+export type CatalogCandidate = { agent: string; device?: string; model?: string; when?: string };
+export type Catalog = { roles: Record<string, CatalogCandidate[]>; version?: number; generatedAt?: string };
+/** A rule's `to` naming `role:<角色>` says dispatch walks that role's chain instead of one fixed agent. */
+export const ROLE_PREFIX = "role:";
 export type Rules = Registered & {
   timezone: string;
   askFirst: string[];

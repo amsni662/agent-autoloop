@@ -117,6 +117,10 @@
 
 同组规则的 `parallel` 是整组上限。还可以给单条规则设置 `maxActive`，限制该规则同时领取的轮数，各事项仍各自排队。给 `agents` 里的某个 Agent 设置 `maxActive`，则限制它跨所有规则同时领取的轮数。两个值都可省略，填写时用正整数。三个上限同时生效，调低后等已领取的轮次收尾再派新单。
 
+`to` 除了写死一个 Agent，也可以写 `role:<角色>`（角色名是小写字母、数字和 `-`）。角色是 `catalog/` 清单里的一条候选链，派单时从上往下取第一个能用的：Agent 已登记、所在设备在线、它的模型没被限流或额度暂停、它还有空位。被跳过的候选和原因记在轮次的 `resolved` 里，`GET /v1/state` 和 `agent-autoloop status` 能看到。整条链都不能用时这一轮排住、只通知一次；有候选说了恢复时刻就推到最早那个时刻再试。写死 Agent 的规则照旧跑，行为不变；中台没有加载清单时 `role:` 规则派不出去，同样只通知一次。清单由 `catalog/manifest.json`（记着 `roles.yaml`、`models.md` 的 sha256）整份校验：坏了或被改过就拒绝，继续用上一份清单并通知一次。`model_holds` 是运行时状态，不写回清单。这是兼容的扩展，原有规则文件不用改。
+
+回执里的 `error`、诊断的 `raw` 和 `explain` 进日志、投影、卡片和档案之前先脱敏：令牌、私钥、授权头、`名=值` 写法的凭据换成 `[已脱敏]`。老接单程序送来的原文按同一套规则处理。
+
 不管写没写 `resume`，一轮要接的会话里如果还有别的轮次没结束，或者没了音信、可能还在跑，这一轮就开新会话，不让两个进程开同一个会话；回答和复查的内容照样带给它。
 
 排队和等待重试的任务在领取时一起采用最新的 Agent、目录、提示词和权限；换了 Agent 就不带旧 Agent 的会话。已经领取的任务保留领取时的 Job 配置和接单程序，重复 claim、心跳、停止和重启恢复都不随规则更新换人。事件已经归属的事项不重新拆分或合并，回答和到期的复查回到提问和约定时的事项，规则后来去掉 `parallel` 也一样；回执中的事件许可和通知方式仍按提交时的规则核验。
@@ -244,7 +248,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 
 - 结果可以重放：响应丢了，同一个 token 再交一次同样的内容，得到同样的确认；内容不同返回 409。
 - `failed` 会重派，所以它只带 `notice`，其余的不生效；本人要停的这一轮交 `failed` 不再重派，`notice` 也不生效。
-- `diagnosis` 可选，由接单程序按退出码、stderr、stdout 和进程状态补上，Agent 插件可以用 `classify` 先认一遍。`category` 是固定分类代码（表见[回执分类](ai-loop/回执分类.md)），`next` 由类别推出。要人处理的分类（`need_login`、`need_approval`、`auth_invalid`、`env_missing`）不再自动重派，改成问题卡片；限流和额度（`rate_limited`、`quota_exhausted`）记 `waitUntil` 进 `model_holds`，照常重派，跨 Agent 改派以后再做；接单程序不在线、领走没报到、回执读不懂由中台自己补分类。`unclassified` 必须带 `raw` 原文和 `output` 位置。老回执没有 `diagnosis` 照收，由中台按结局补一个。
+- `diagnosis` 可选，由接单程序按退出码、stderr、stdout 和进程状态补上，Agent 插件可以用 `classify` 先认一遍。`category` 是固定分类代码（表见[回执分类](ai-loop/回执分类.md)），`next` 由类别推出。要人处理的分类（`need_login`、`need_approval`、`auth_invalid`、`env_missing`）不再自动重派，改成问题卡片；限流和额度（`rate_limited`、`quota_exhausted`）记 `waitUntil` 进 `model_holds`：角色链上此刻还有能用的候选就当场改派接上，整链都不能用就只通知一次、推到最早恢复时刻；接单程序不在线、领走没报到、回执读不懂、没有能用的候选由中台自己补分类（`no_candidate`）。`unclassified` 必须带 `raw` 原文和 `output` 位置。老回执没有 `diagnosis` 照收，由中台按结局补一个。
 - 需要本人恢复连接、登录或身份验证时，用 `done` 结束本轮并交 `ask`，不交 `failed`。`done` 表示本轮结束，未完成的事项由卡片继续跟进，不代表网页已经验收。同一阻塞已有 `open` 卡片时不重复提问，不用 `later` 定时重试；`waiting` 里同一阻塞已有的复查用 `cancel` 取消。保留已完成业务，`about` 写清恢复后只做哪些剩余步骤。
 - `usage` 由接单程序上报本次执行的用量，包含这次执行的回执重写；每一项都可以没有：`input`、`output`、`cached` 是 Token 数，`cost` 是美元。`input` 是全部输入，包括从缓存读的和写进缓存的；`cached` 是其中从缓存读的部分，价格通常只有一小部分，所以单独列出。中台把同一轮各次执行的已报数值相加，重复提交不重复计费；没有上报的字段保持缺省，不当成零。`agent-autoloop status` 按完成时间汇总今天和最近 7 天已结束的轮次，没上报的轮数如实写出来。
 - 有的 Agent 只给会话累计值（Codex 的 Token、Claude Code 的费用）。接单程序减去这次启动前的累计值再上报，所以这里总是本次的量；没有记录的续接不报这几项，详见[插件说明](plugins.md#agent-插件)。

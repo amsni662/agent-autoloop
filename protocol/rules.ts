@@ -79,7 +79,11 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
   checkFields(issues, where, rule, [
     ["name", isText, NOT_EMPTY],
     ["when", isObject, "要是一个对象"],
-    ["to", isKeyOf(rules.agents), `不是已登记的 Agent：${isObject(rule) ? rule.to : ""}`],
+    [
+      "to",
+      (value) => isKeyOf(rules.agents)(value) || (typeof value === "string" && /^role:[a-z][a-z0-9-]*$/.test(value)),
+      `不是已登记的 Agent：${isObject(rule) ? rule.to : ""}`,
+    ],
     ["cwd", isFolder, FOLDER],
     ["skill", isText, NOT_EMPTY, true],
     ["prompt", isText, NOT_EMPTY, true],

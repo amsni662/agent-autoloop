@@ -3,6 +3,7 @@
 import { realpathSync, watch } from "node:fs";
 import { basename, dirname } from "node:path";
 import { RULES_FILE } from "./home.ts";
+import { CATALOG_DIR } from "./catalog.ts";
 import { loadPlugin } from "./plugins.ts";
 import { createArchiveSidecar } from "./archive.ts";
 import * as hub from "./runtime.ts";
@@ -108,9 +109,26 @@ export function makeHandler(commit = "dev") {
     if (facts.some((fact) => fact.changes.some((change) => change.table === "archive_writes"))) archiver.kick();
   });
   // libuv 1.52 (Node 24.16+) on Windows asserts and exits on the first change in a folder named through an 8.3 short name.
+  // 清单变了同样来一遍：tick 里 reloadCatalog 校验它，坏了发通知、继续用旧的。
+  // 目录可能在启动后才建：父目录的监听看到它就（重新）挂上；挂不上也由 tick 兜底。
+  let catalogWatcher: ReturnType<typeof watch> | null = null;
+  const armCatalog = () => {
+    catalogWatcher?.close();
+    catalogWatcher = null;
+    try {
+      catalogWatcher = watch(realpathSync.native(CATALOG_DIR), () => fire());
+    } catch {
+      // 还没建或刚好被删掉：tick 里的 reloadCatalog 照样拾取。
+    }
+  };
   const watcher = watch(realpathSync.native(dirname(RULES_FILE)), (_event, file) => {
     if (file === basename(RULES_FILE)) fire();
+    if (file === basename(CATALOG_DIR)) {
+      armCatalog();
+      fire();
+    }
   });
+  armCatalog();
   const handle = createHandler({
     commit,
     now: Date.now,
@@ -152,6 +170,7 @@ export function makeHandler(commit = "dev") {
       closed = true;
       clearTimeout(timer);
       watcher.close();
+      catalogWatcher?.close();
       unlisten();
       archiver.close();
       wake();

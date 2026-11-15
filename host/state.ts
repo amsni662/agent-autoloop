@@ -12,7 +12,7 @@ const VIEWS = {
   events: "id source key type subject summary detail link routed paused received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
-    "claimed_at seen_at finished_at manual summary error usage diagnosis rules_version archive",
+    "claimed_at seen_at finished_at manual summary error usage diagnosis rules_version archive resolved",
   run_events: "run_id event_id",
   cards:
     "id key kind title text detail options recommend about state fyi quiet choice answer by result rule lane grp source " +
@@ -336,6 +336,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
       link: run.link ?? "",
       session: run.session,
       usage: run.usage ? JSON.parse(run.usage) : null,
+      resolved: run.resolved ? JSON.parse(run.resolved) : null,
       stopping: run.cancel_at !== null,
       manual: Boolean(run.manual),
       events: all<Row>(EVENTS_OF_RUN, [run.id]),
