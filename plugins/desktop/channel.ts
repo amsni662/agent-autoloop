@@ -5,6 +5,7 @@
 import { execFile, spawnSync } from "node:child_process";
 import type { Card, ChannelContext } from "../../host/channels.ts";
 import { POWERSHELL, powershell } from "../../host/command.ts";
+import { classify, loadPolicy, sanitize } from "../../adapters/chat/notify.ts";
 
 const WORDS = "运行 agent-autoloop status 查看";
 const TITLE = "Agent 问你一个问题";
@@ -68,8 +69,11 @@ function show(title: string) {
   });
 }
 
-export default async function desktop({ hub, log, signal }: ChannelContext) {
+export default async function desktop({ hub, options, log, signal }: ChannelContext) {
   const available = hasDesktop();
+  // The owner-message policy (docs/消息清单.md), same as every channel: a card that may not push is acked with
+  // no ref and left on the hub; the on-screen text is sanitized like anything else the owner reads.
+  const policy = loadPolicy((options as Record<string, unknown>).policy as Parameters<typeof loadPolicy>[0]);
   while (!signal.aborted) {
     let card: Card | null;
     try {
@@ -89,9 +93,15 @@ export default async function desktop({ hub, log, signal }: ChannelContext) {
       await hub.delivered(card.id, card.version, `skipped-${card.id}`);
       continue;
     }
+    const verdict = classify(card, policy);
+    if (!verdict.send) {
+      await hub.delivered(card.id, card.version, null);
+      log(`卡片 ${card.id} 按政策不弹（${verdict.why}）`);
+      continue;
+    }
     try {
       const shown = card.rule && card.rule !== card.title ? `${card.title}\n来源：${card.rule}` : card.title;
-      await show(card.detail ? `${shown}\n${card.detail}` : shown);
+      await show(sanitize(card.detail ? `${shown}\n${card.detail}` : shown));
       await hub.delivered(card.id, card.version, `shown-${card.id}`);
     } catch (error) {
       log(`卡片 ${card.id} 的桌面通知没发出：${error}`);

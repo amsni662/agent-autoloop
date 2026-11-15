@@ -1,0 +1,9 @@
+{
+  "hub": "http://office-mini.tail40e8f6.ts.net:7878",
+  "me": "ou_本人的 open_id（AI Loop 应用下）",
+  "keysFile": "~/mini-hub/ai-loop/secrets/feishu-chat.json",
+  "rulesFile": "~/.agent-autoloop/rules.json",
+  "stateFile": "~/mini-hub/ai-loop/secrets/feishu-chat-state.json",
+  "lark": "/Users/spider/.local/node/bin/lark-cli",
+  "features": { "intake": true, "notify": true, "answers": true }
+}

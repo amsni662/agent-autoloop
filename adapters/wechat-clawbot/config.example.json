@@ -1,0 +1,9 @@
+{
+  "hub": "http://office-mini.tail40e8f6.ts.net:7878",
+  "me": "本人微信的 userId（secrets/wechat-account.json 里的 userId）",
+  "keysFile": "~/mini-hub/ai-loop/secrets/wechat-clawbot.json",
+  "rulesFile": "~/.agent-autoloop/rules.json",
+  "stateFile": "~/mini-hub/ai-loop/secrets/wechat-clawbot-state.json",
+  "accountFile": "~/mini-hub/ai-loop/secrets/wechat-account.json",
+  "features": { "intake": true, "notify": true, "answers": true }
+}

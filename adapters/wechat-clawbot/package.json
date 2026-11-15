@@ -1,0 +1,10 @@
+{
+  "name": "ai-loop-wechat-clawbot",
+  "private": true,
+  "type": "module",
+  "description": "AI Loop chat entry for personal WeChat ClawBot over iLink. The transport package is only installed here, never in the engine's own package.json.",
+  "dependencies": {
+    "@tencent-weixin/openclaw-weixin": "2.4.4",
+    "openclaw": "2026.4.2"
+  }
+}

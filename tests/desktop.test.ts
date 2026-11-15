@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { setup } from "./helpers.ts";
 import type { Card } from "../host/channels.ts";
+import { sanitize } from "../adapters/chat/notify.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-autoloop-desktop-"));
 const rulesFile = join(dir, "rules.json");
@@ -150,7 +151,7 @@ test("what an Agent wrote goes in as one argument after the options, and never i
   assert.equal(calls.length, hostile.length);
   const scriptOf = (call: string[]) => call.slice(0, call.indexOf("--"));
   calls.forEach((call, index) => {
-    assert.deepEqual(call.slice(call.indexOf("--")), ["--", TITLE, body(hostile[index])]);
+    assert.deepEqual(call.slice(call.indexOf("--")), ["--", TITLE, body(sanitize(hostile[index]))]);
     assert.deepEqual(scriptOf(call), scriptOf(calls[0]), "the script is the same whatever the card says");
   });
   assert.ok(!scriptOf(calls[0]).join("\n").includes("touch"));
