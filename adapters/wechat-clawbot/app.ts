@@ -66,6 +66,22 @@ export async function createWechatApp(opts: WechatOpts) {
     return null;
   };
 
+  // A reply dying on the credential gate is invisible to the owner — they asked and heard nothing. After three
+  // refusals in a row the hub hears about it once a day (a card the Feishu channel can still deliver); the count
+  // resets when a send goes out or a fresh credential arrives.
+  let blockedSends = 0;
+  const tellBlocked = () => {
+    if (blockedSends < 3) return;
+    blockedSends = 0;
+    const day = new Date().toISOString().slice(0, 10);
+    source
+      .tell({
+        key: `wechat-reply-blocked-${day}`,
+        text: "微信这边有消息回不出去：回复凭据超过时限没刷新。在微信里随手发一句话给它就能恢复；卡住没回的记在看板上。",
+      })
+      .catch((error) => log(`上报回复受阻失败：${String(error).slice(0, 120)}`));
+  };
+
   const send = async (text: string) => {
     if (!config.features.notify) {
       log(`（发通知关着）${text.slice(0, 60)}`);
@@ -76,9 +92,12 @@ export async function createWechatApp(opts: WechatOpts) {
       // Without a fresh credential the transport would still "succeed" while nothing arrives — refuse, audit.
       log(`${blocked}，发不出去：${text.slice(0, 60)}`);
       recordSuppressed(state, "reply", blocked);
+      blockedSends += 1;
+      tellBlocked();
       return;
     }
     await io.sendText({ to: config.me, text: sanitize(text), contextToken: state.contextToken! });
+    blockedSends = 0;
   };
 
   const deps = { config, state, save, source, channel, channelName: "wechat", numbered: true, send, log };
@@ -88,15 +107,16 @@ export async function createWechatApp(opts: WechatOpts) {
     if (message.from_user_id !== config.me) return;
     const msgId = message.message_id;
     if (typeof msgId !== "string" || !msgId) return;
-    // Stamp the capture time only when the token value changes: a redelivered message carries the same token,
-    // and restamping it would make an old credential look fresh.
-    if (message.context_token && message.context_token !== state.contextToken) {
-      state.contextToken = message.context_token;
-      state.contextTokenAt = new Date().toISOString();
-    }
     if (!markSeen(state, msgId)) {
       log(`${msgId} 已处理过，跳过重投`);
       return;
+    }
+    // Every message the platform hasn't already handed us carries a fresh credential — restamp even when the
+    // token value repeats (the platform may reuse it), but never restamp off a redelivered old message.
+    if (message.context_token) {
+      state.contextToken = message.context_token;
+      state.contextTokenAt = new Date().toISOString();
+      blockedSends = 0;
     }
     const text = (message.item_list ?? [])
       .filter((item) => item.type === 1 && item.text_item?.text)

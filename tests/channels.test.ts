@@ -576,3 +576,75 @@ test("feishu: an open card that can't be updated isn't sent again, and a first m
   assert.ok(send.includes("--idempotency-key agent-autoloop-card-5 "), send);
   assert.deepEqual(first.calls, [["delivered", 5, 3, "om_new"]]);
 });
+
+test("feishu: the owner-message policy gates new sends and cleans what the owner reads", async () => {
+  // Failure this guards: a card the message list doesn't allow still reaching the owner raw — progress noise,
+  // hub= strings, paths, JSON — because the hub-side channel skipped the policy the adapters obey.
+  const log = join(dir, "lark-policy.log");
+  const lark = join(dir, "lark-cli-policy");
+  writeFileSync(
+    lark,
+    `#!/bin/sh
+{ echo "=="; printf '%s\n' "$@"; } >> "${log}"
+case "$*" in
+  *"event consume"*) exec sleep 30 ;;
+  *) cat > /dev/null; echo '{"ok":true,"data":{"message_id":"om_9"}}' ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  const stop = new AbortController();
+  const cards: (Card | null)[] = [
+    // Progress noise: allowed only to sit on the hub, never to push.
+    { ...base, id: 11, kind: "notice", state: "closed", title: "本机", text: "AI Loop 进度：已开始搭建", options: [] },
+    // A decide card whose raw text would leak internals: sent, but only cleaned.
+    {
+      ...base,
+      id: 12,
+      title: "要不要删缓存 hub=48181f8aaaa",
+      text: '报错原文在下\n{\n  "error": "forbidden",\n  "path": "/Users/spider/mini-hub/x"\n}\n占满了',
+    },
+    // Already delivered once: an update is the same message, policy doesn't re-gate it.
+    { ...base, id: 12, version: 2, ref: "om_9", state: "decided", choice: 0 },
+  ];
+  const calls: unknown[][] = [];
+  const hub = {
+    async nextCard() {
+      if (cards.length) return { card: cards.shift()! };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      stop.abort();
+      return { card: null };
+    },
+    async delivered(...args: unknown[]) {
+      calls.push(["delivered", ...args]);
+      return {};
+    },
+    async failed(...args: unknown[]) {
+      calls.push(["failed", ...args]);
+      return {};
+    },
+    async answer() {
+      return { changed: true };
+    },
+  };
+  await feishu({ hub: hub as any, options: { user: "ou_me", lark }, log: () => {}, signal: stop.signal });
+  const args = readFileSync(log, "utf8").trim().split("\n");
+  const callStarts = args.reduce<number[]>((all, arg, i) => (arg === "==" ? [...all, i] : all), []);
+  const sends = callStarts.filter((i, j) => args.slice(i, callStarts[j + 1] ?? args.length).includes("+messages-send"));
+  assert.equal(sends.length, 1, `压下的卡也发了：${args.join(" | ")}`);
+  const sent = JSON.parse(args[sends[0] + args.slice(sends[0]).indexOf("--content") + 1]);
+  const text = JSON.stringify(sent);
+  assert.ok(!text.includes("hub=") && !text.includes("48181f8"), `代号漏出：${text}`);
+  assert.ok(!text.includes("forbidden") && !text.includes('"error"'), `报错原文漏出：${text}`);
+  assert.ok(!text.includes("/Users/spider"), `路径漏出：${text}`);
+  assert.match(text, /占满了/);
+  assert.deepEqual(
+    calls,
+    [
+      ["delivered", 11, 1, null],
+      ["delivered", 12, 1, "om_9"],
+      ["delivered", 12, 2, "om_9"],
+    ],
+    `记账不对：${JSON.stringify(calls)}`,
+  );
+});

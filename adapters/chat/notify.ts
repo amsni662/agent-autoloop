@@ -53,6 +53,7 @@ const match = (pattern: string | undefined, text: string) => pattern !== undefin
 // 对照《消息清单》第 3 节：压下的在前，拍板居中，结果靠 state 收尾；不中的默认不推。
 export const DEFAULT_RULES: PolicyRule[] = [
   { title: "^AI Loop 进度", to: "suppress", note: "搭建进度不推" },
+  { text: "^AI Loop 进度", to: "suppress", note: "搭建进度不推" },
   { text: "没有回音，不确定做没做完", to: "suppress", note: "超时没回音会自动处理" },
   { text: "次自动处理没跑完[\\s\\S]*会自动再试", to: "suppress", note: "还在自动重试" },
   { text: "档案写回(没写进去|失败了)", to: "suppress", note: "档案写回失败自动重试" },
@@ -98,16 +99,37 @@ export function classify(card: CardLike, policy: NotifyPolicy = DEFAULT_POLICY):
 const MAX_TEXT = 500;
 const MAX_LINES = 8;
 
+/** 多行 JSON 整块剥除：一行以 { 或 [ 结尾视作块开头，按括号配平吞到闭合行；吞不下的按行剥「"键": 值」碎片。 */
+function stripJsonBlocks(text: string): string {
+  const kept: string[] = [];
+  let depth = 0;
+  for (const line of text.split("\n")) {
+    if (depth === 0) {
+      if (/[{[]\s*$/.test(line)) {
+        depth = Math.max(1, (line.match(/[{[]/g)?.length ?? 0) - (line.match(/[}\]]/g)?.length ?? 0));
+        continue;
+      }
+      kept.push(line);
+      continue;
+    }
+    depth += (line.match(/[{[]/g)?.length ?? 0) - (line.match(/[}\]]/g)?.length ?? 0);
+    if (depth < 0) depth = 0;
+  }
+  return kept.join("\n");
+}
+
 /** 出站净身：先过凭据脱敏，再出门禁——内部代号、版本串、路径、堆栈、JSON、报错原文，全留下。 */
 export function sanitize(raw: string, max = MAX_TEXT): string {
-  let out = redact(String(raw));
+  let out = stripJsonBlocks(redact(String(raw)));
   out = out
     .replace(/\b(?:hub|engine|main|app)=[0-9a-f]{7,64}\b/gi, "当前版本")
     .replace(/\b[0-9a-f]{32,64}\b/gi, "（长串略）")
     .replace(/~?\/(?:[\w.-]+\/)+[\w.-]+/g, "（路径略）")
     .replace(/[A-Za-z]:\\[\w\\.-]+/g, "（路径略）")
     .replace(/^[ \t]*at\s+[^\n]*$/gm, "")
-    .replace(/^[ \t]*[{[][^\n]*[}\]][ \t]*$/gm, "");
+    .replace(/^[ \t]*[{[][^\n]*[}\]][ \t]*$/gm, "")
+    .replace(/^[ \t]*"(?:[^"\\]|\\.)*"[ \t]*:[^\n]*,[ \t]*$/gm, "")
+    .replace(/^[ \t]*"(?:[^"\\]|\\.)*"[ \t]*:[ \t]*(?:"[^"\n]*"|-?[\d.eE+-]+|true|false|null|[[{])[ \t]*$/gm, "");
   for (let i = 0; i < 3; i++) out = out.replace(/\{[^{}\n]*\}/g, "（报文略）");
   out = out
     .replace(/\b[ST]\d{1,3}\b/g, "（编号略）")

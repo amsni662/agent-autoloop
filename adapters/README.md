@@ -20,11 +20,14 @@ adapters/
 | 日志     | `~/Library/Logs/ai-loop-<名字>.log`                                                     |
 | launchd  | `ai-loop-feishu-chat`、`ai-loop-wechat-clawbot`                                         |
 
-配置字段：`hub`（中枢地址）、`me`（本人编号：飞书 open_id / 微信 userId）、`keysFile`、`rulesFile`（读已登记项目）、`stateFile`、`features`（`intake` 收指令、`notify` 发通知、`answers` 拍板，三个开关）、`policy`（消息政策，见下）、飞书另有 `lark`，微信另有 `accountFile`。
+配置字段：`hub`（中枢地址）、`me`（本人编号：飞书 open_id / 微信 userId）、`keysFile`、`rulesFile`（读已登记项目）、`stateFile`、`features`（`intake` 收指令、`notify` 发通知、`answers` 拍板，三个开关）、`policy`（消息政策，见下）、飞书另有 `lark`，微信另有 `accountFile`、`transportDir`。
 
 ## 消息政策（《消息清单》落地）
 
-发给本人的消息只留三类——**要拍板/动手的（decide）、本人提问的回复（reply）、本人说过要知道的结果（result）**，其它一律不推。政策在 `adapters/chat/notify.ts` 一处生效：
+发给本人的消息只留三类——**要拍板/动手的（decide）、本人提问的回复（reply）、本人说过要知道的结果（result）**，其它一律不推。政策实现在 `adapters/chat/notify.ts` 一处，两条路都过它：
+
+- **入口进程**（`adapters/feishu-chat`、`adapters/wechat-clawbot`）走自己的 `policy` 配置段。
+- **中枢侧通道**（`plugins/feishu`、`plugins/desktop`）同样先判后发卡：`classify` 压下的卡记 `delivered(version, ref=null)`——不算投递失败、不重发、可在看板查；给本人看的标题/正文/选项全部过 `sanitize()`。通道政策写在 `config.json` 的 `channels.<名>.policy`（结构和入口的 `policy` 一样），不写按内置默认表。已经送达过的卡只更新原消息，不再过分类——更新是同一事项，不是新推送。
 
 - **卡片**：`classify(card, policy)` 对照表先判，放行才发；压下的卡记进状态文件 `suppressed`（什么卡、为什么没发），中枢侧按 `delivered(version, ref=null)` 记账——不算投递失败、不重发、可在看板查。
 - **回复文字**：本人发消息触发的回话（帮助、拍板回执、项目切换等）由 `act.ts` 产生，出门时统一过 `sanitize()`。
@@ -55,7 +58,9 @@ adapters/
 
 ### 微信凭据时效
 
-`policy.tokenMaxAgeMs`：微信 `context_token` 只允许用「最新来信」带回来的；状态文件 `contextTokenAt` 记采集时刻，超过这个毫秒数的凭据不发——卡片按 `failed` 报回中枢（发送接口返回成功 ≠ 送达，实测见 `docs/系统架构.md`）。不写按内置 15 分钟算——2026-11-16 实测约 56 分钟凭据已被平台收而不投，真实失效点未测准，宁紧勿松。
+`policy.tokenMaxAgeMs`：微信 `context_token` 只允许用「最新来信」带回来的；状态文件 `contextTokenAt` 记采集时刻，超过这个毫秒数的凭据不发——卡片按 `failed` 报回中枢（发送接口返回成功 ≠ 送达，实测见 `docs/系统架构.md`）。不写按内置 15 分钟算——2026-11-16 实测约 56 分钟凭据已被平台收而不投，真实失效点未测准，宁紧勿松。凭据过期时回复本身发不出去：连续拦下 3 条会向中枢上报一张「微信回复受阻」的卡（一天一张），经飞书通道送达本人——本人随手发条微信凭据即恢复。
+
+`transportDir`：微信传输包（`@tencent-weixin/openclaw-weixin`）的安装目录。入口默认按包名解析（要求在本适配器目录跑过 `npm install`）；部署机上共享一份安装时，把 `transportDir` 写成那个包的目录（绝对路径或 `~/`，里面是 `dist/src/api/api.js` 等）即可，不用再装一遍。目录不存在时入口报一句指明原因的话再退出。
 
 ## 首次安装
 

@@ -27,6 +27,9 @@ export type ChatConfig = {
   lark?: string;
   /** WeChat only: the iLink binding profile (token, userId, baseUrl). */
   accountFile?: string;
+  /** WeChat only: where the transport package (@tencent-weixin/openclaw-weixin) is installed, when the adapter's
+   * own node_modules doesn't hold it — e.g. a shared install on the host it deploys to. */
+  transportDir?: string;
 };
 
 const expand = (value: string) =>
@@ -53,8 +56,11 @@ export function loadConfig(file: string): ChatConfig {
       answers: features.answers !== false,
     },
   };
-  for (const field of ["lark", "accountFile"] as const) {
+  for (const field of ["lark", "accountFile", "transportDir"] as const) {
     if (typeof given[field] === "string") config[field] = expand(given[field]);
+  }
+  if (config.transportDir && !isAbsolute(config.transportDir)) {
+    throw new Error(`配置 ${file} 的 transportDir 要写成绝对路径或 ~/ 开头`);
   }
   if (given.policy !== undefined) {
     if (typeof given.policy !== "object" || given.policy === null) throw new Error(`配置 ${file} 的 policy 要写成对象`);

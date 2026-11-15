@@ -221,3 +221,39 @@ test("定了的卡更新不推：decided 版本再 offer 也只记投递", async
   assert.equal(await app.deliverOnce(0), true);
   assert.equal(ilink.calls.sends.length, before, "定了的卡不推第二条");
 });
+
+test("凭据盖章：平台复用同一 token 的新来信也刷新时间，旧消息重投不显嫩", async () => {
+  const { ilink, app } = await spawn("wp7.json");
+  await greet(ilink, app, "wp7");
+  // 平台连续两条消息用同一个 token：第二条（新 message_id）照样把采集时间刷新。
+  app.state.contextTokenAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+  ilink.feed([inboundText({ message_id: "wp7-same-token", text: "状态", context_token: "ctx-secret-token" })]);
+  await app.pollOnce();
+  assert.ok(Date.now() - Date.parse(app.state.contextTokenAt!) < 60_000, "同 token 的新来信也要刷新时间");
+  // 反过来：同一条旧消息被平台重投，不许把旧凭据盖成新的。
+  app.state.contextTokenAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+  const old = app.state.contextTokenAt;
+  ilink.feed([inboundText({ message_id: "wp7-same-token", text: "状态", context_token: "ctx-secret-token" })]);
+  await app.pollOnce();
+  assert.equal(app.state.contextTokenAt, old, "重投的旧消息不许刷新凭据时间");
+});
+
+test("回复连续被凭据闸拦下：向中枢上报一张本人能看到的卡", async () => {
+  const { ilink, app } = await spawn("wp8.json");
+  await greet(ilink, app, "wp8");
+  // 凭据还在但已过期：每条回复都被拦；拦到第 3 条时，往中枢 tell 一张「微信回不出去」的卡。
+  app.state.contextTokenAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+  for (const id of ["wp8-a", "wp8-b", "wp8-c"]) {
+    ilink.feed([inboundText({ message_id: id, text: "帮助", context_token: undefined })]);
+    await app.pollOnce();
+  }
+  const day = new Date().toISOString().slice(0, 10);
+  const key = `source:wechat:wechat-reply-blocked-${day}`;
+  const { rows } = await import("../kernel/evolve.ts");
+  const find = () => rows(hubFns.getView(), "cards", { key })[0];
+  const deadline = Date.now() + 3_000; // 上报是异步的，等它落库
+  while (!find() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+  const card = find();
+  assert.ok(card, "连续被拦没有上报给中枢");
+  assert.match(card!.text!, /回复凭据|发一句话/);
+});

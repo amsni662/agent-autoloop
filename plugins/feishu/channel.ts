@@ -7,6 +7,7 @@ import { execFile, spawn } from "node:child_process";
 import type { Card, ChannelContext } from "../../host/channels.ts";
 import { eachLine } from "../../host/lines.ts";
 import { commandLine } from "../../host/command.ts";
+import { classify, loadPolicy, sanitize } from "../../adapters/chat/notify.ts";
 
 /** Feishu sends these values as JSON in a string, which may be empty. */
 function safeJson(text: unknown): any {
@@ -38,12 +39,12 @@ export function render(card: Card) {
     corner_radius: "8px",
     padding: "8px 12px 8px 12px",
     behaviors: [{ type: "callback", value: { card: card.id, choice: index } }],
-    elements: [{ tag: "div", text: { tag: "plain_text", content: label } }],
+    elements: [{ tag: "div", text: { tag: "plain_text", content: sanitize(label) } }],
   });
-  const afterwards = outcome ? [{ tag: "markdown", content: `**${outcome}**` }] : [];
+  const afterwards = outcome ? [{ tag: "markdown", content: `**${sanitize(outcome)}**` }] : [];
   const noteSaid =
     card.kind === "notice" && card.answer
-      ? [{ tag: "div", text: { tag: "plain_text", content: `处理说明：${card.answer}` } }]
+      ? [{ tag: "div", text: { tag: "plain_text", content: `处理说明：${sanitize(card.answer)}` } }]
       : [];
   const notice = card.kind === "notice";
   // Both forms submit `note`; an ask uses it as the answer, a notice records it when closing the card.
@@ -82,18 +83,18 @@ export function render(card: Card) {
     schema: "2.0",
     config: { update_multi: true, enable_forward: false },
     header: {
-      title: { tag: "plain_text", content: card.title },
+      title: { tag: "plain_text", content: sanitize(card.title) },
       // Which rule or task it came from, in every state: cards from many places reach one person.
       ...(card.rule && card.rule !== card.title
-        ? { subtitle: { tag: "plain_text", content: `来源：${card.rule}` } }
+        ? { subtitle: { tag: "plain_text", content: `来源：${sanitize(card.rule)}` } }
         : {}),
       template: card.state === "open" ? "blue" : card.state === "closed" ? "grey" : "green",
     },
     body: {
       elements: [
         // 分类明细跟在「来源」的副标题后面，是正文第一行。
-        ...(card.detail ? [{ tag: "div", text: { tag: "plain_text", content: card.detail } }] : []),
-        ...(card.text ? [{ tag: "markdown", content: card.text }] : []),
+        ...(card.detail ? [{ tag: "div", text: { tag: "plain_text", content: sanitize(card.detail) } }] : []),
+        ...(card.text ? [{ tag: "markdown", content: sanitize(card.text) }] : []),
         ...(card.state === "open"
           ? [...(notice ? textForm : []), ...card.options.map(option), ...(notice ? [] : textForm)]
           : [...afterwards, ...noteSaid]),
@@ -104,6 +105,10 @@ export function render(card: Card) {
 
 export default async function feishu({ hub, options, log, signal }: ChannelContext) {
   const program = (options.lark as string | undefined) ?? "lark-cli";
+  // The owner-message policy (docs/消息清单.md): which new cards may push at all is judged before anything is
+  // sent; a card already delivered keeps updating its one message, whatever the verdict would say of the new
+  // version — an update is the same item, not another push.
+  const policy = loadPolicy(options.policy as Parameters<typeof loadPolicy>[0]);
   const lark = async (args: string[], input?: string) => {
     const printed = await new Promise<string>((resolve, reject) => {
       const child = execFile(
@@ -145,6 +150,16 @@ export default async function feishu({ hub, options, log, signal }: ChannelConte
       }
       if (!card) continue;
       try {
+        if (!card.ref) {
+          // Never delivered: the policy decides whether this may reach the owner at all. A held-back card is
+          // acked with no ref — this version counts as handled, the card stays on the hub and the dashboard.
+          const verdict = classify(card, policy);
+          if (!verdict.send) {
+            await hub.delivered(card.id, card.version, null);
+            log(`card ${card.id}: not pushed (${verdict.why})`);
+            continue;
+          }
+        }
         const content = JSON.stringify(render(card));
         let ref = card.ref;
         if (ref) {

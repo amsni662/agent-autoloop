@@ -19,7 +19,10 @@ if (!config.accountFile) {
 const account = JSON.parse(readFileSync(config.accountFile, "utf8")) as IlinkAccount;
 
 const stopping = new AbortController();
-const io = await createTransportIO(account, stopping.signal);
+const io = await createTransportIO(account, stopping.signal, config.transportDir).catch((error) => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+});
 const app = await createWechatApp({ configFile, io });
 
 const log = (line: string) => console.log(`${new Date().toISOString()} ${line}`);

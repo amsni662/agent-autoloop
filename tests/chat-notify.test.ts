@@ -55,6 +55,29 @@ test("sanitize：hub=commit、长串、路径、堆栈、JSON、英文分类、�
   assert.match(out, /AI Loop 进度：已开始/);
 });
 
+test("sanitize：多行 JSON 整块剥除——开头行、键值行、缩进、闭合行都不许出门", () => {
+  const pretty = JSON.stringify({ error: { type: "forbidden", msg: "no" }, code: 403 }, null, 2);
+  const out = sanitize(`出错了，原文在下：\n${pretty}\n上面那段不许给本人看`);
+  for (const bad of ['"error"', '"type"', "forbidden", '"code"', "{", "}"]) {
+    assert.ok(!out.includes(bad), `不该出现「${bad}」，实得：${out}`);
+  }
+  assert.match(out, /出错了/);
+  assert.match(out, /上面那段不许给本人看/);
+  // 嵌套数组、字符串里带花括号的也要整块走
+  const nested = JSON.stringify({ a: [1, 2], b: { c: "x{y}" } }, null, 2);
+  const out2 = sanitize(nested);
+  for (const bad of ['"a"', '"b"', '"c"', "x{y}", "["]) assert.ok(!out2.includes(bad), `漏了「${bad}」：${out2}`);
+  // 数组开头、报文碎片（只有键值行没有括号）同样剥
+  const arr = sanitize(`结果如下\n[\n  1,\n  2\n]`);
+  assert.ok(!/[\[\]12]/.test(arr.replace(/详情见看板/, "")), `数组块没剥净：${arr}`);
+  const frag = sanitize(`报错原文：\n  "error": "auth failed",\n  "status": 403`);
+  for (const bad of ['"error"', '"status"', "auth failed"])
+    assert.ok(!frag.includes(bad), `碎片漏了「${bad}」：${frag}`);
+  // 正常带引号的中文行不能误伤
+  const fine = sanitize('他说"这样"行，我说：不行');
+  assert.match(fine, /他说"这样"行/);
+});
+
 test("sanitize：超长截断到上限并注明「详情见看板」", () => {
   const out = sanitize("很长的一句话。".repeat(80));
   assert.ok(out.length <= 560, `截断后 ${out.length} 字`);
@@ -104,6 +127,7 @@ test("classify：自动恢复的、进度类、已定的，只记状态不推", 
     card({ title: "微信任务", text: "连续 3 次自动处理没跑完（卡在：限流），21:01 会自动再试。", state: "open" }),
     card({ title: "微信任务", text: "这一轮的档案写回没写进去：磁盘满了", state: "open" }),
     card({ title: "AI Loop 进度", text: "已开始搭建", state: "closed" }),
+    card({ title: "本机", text: "AI Loop 进度：已开始搭建", state: "closed" }),
     card({ title: "接单程序没连上", text: "mbp 已经 47 分钟没连上中台，有 1 件任务在排队", state: "open" }),
     card({ title: "删缓存吗", state: "decided", choice: 0 }),
     card({ kind: "mystery", title: "没见过的新类型", state: "open" }),
