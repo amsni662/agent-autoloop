@@ -9,10 +9,10 @@ import { cronOf, eventRule, SCHEDULE, type Rules } from "../kernel/rules.ts";
 
 /** The columns of the read-only SQL views over the projections, which the queries here read. */
 const VIEWS = {
-  events: "id source key type subject summary detail link routed paused received_at",
+  events: "id source key type subject summary detail link from via routed paused received_at",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
-    "claimed_at seen_at finished_at manual summary error usage diagnosis rules_version archive resolved",
+    "claimed_at seen_at finished_at manual summary error usage diagnosis rules_version archive resolved gate",
   run_events: "run_id event_id",
   cards:
     "id key kind title text detail options recommend about state fyi quiet choice answer by result rule lane grp source " +
@@ -28,13 +28,15 @@ const VIEWS = {
   quotas: "device provider account plan window used_pct resets_at at",
   archives: "project version summary commit:head pushed push_error pushed_at updated_at",
   archive_writes: "key project kind run by payload state marker claimed_at created_at",
+  gates: "key rule lane event fingerprint score verdict state reasons card judge_run baseline created_at decided_at by",
 };
 
 /** Made anew at every start, so changing them takes no rebuild and no migration. */
 export const viewStatements = Object.entries(VIEWS).map(([table, columns]) => {
   const selected = columns.split(" ").map((column) => {
     const [field, alias] = column.split(":");
-    return `json_extract(data,'$.${field}') AS ${alias ?? field}`;
+    // Identity fields like "from" are reserved words to SQL; every alias is quoted so names never matter.
+    return `json_extract(data,'$.${field}') AS "${alias ?? field}"`;
   });
   return `DROP VIEW IF EXISTS ${table}; CREATE VIEW ${table} AS SELECT ${selected.join(",")} FROM projections WHERE collection='${table}'`;
 });
@@ -310,6 +312,23 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
     })),
     pauses,
     skipped: all<Row>(SKIPPED).map(skippedView),
+    // 指令关口的判断记录：每条被扣下的指令的分数、理由和去向。
+    gates: all<Row>("SELECT * FROM gates ORDER BY created_at DESC LIMIT 50").map(
+      ({ key, rule, lane, event, score, verdict, state, reasons, card, created_at, decided_at, by }) => ({
+        key,
+        rule,
+        lane,
+        event,
+        score,
+        verdict,
+        state,
+        reasons: JSON.parse(reasons ?? "[]"),
+        card,
+        createdAt: created_at,
+        decidedAt: decided_at,
+        by,
+      }),
+    ),
     elsewhere: rules.elsewhere.map(({ name, source, to, cron, where, model, effort }) => {
       const next = iso(nextRun(parseCron(cron)!, now, rules.timezone) ?? now);
       const shown = { id: name, name, source, agent: to, cron, every: describeCron(cron), next, where };

@@ -32,6 +32,9 @@ export type Job = {
       link: string;
       receivedAt: string;
       hops?: number;
+      /** 指令的发送者与代发人身份：来自来源上报，身份表在规则里。 */
+      from?: string;
+      via?: string;
     }[];
     answers: {
       card: number;

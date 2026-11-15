@@ -70,8 +70,8 @@ test("what doesn't decide what's stored can change without a rebuild", () => {
     ["kernel/decide.ts", "const MAX_ATTEMPTS = 10;", "const MAX_ATTEMPTS = 11;"],
     [
       "host/state.ts",
-      'summary error usage diagnosis rules_version archive resolved"',
-      'summary error usage diagnosis rules_version extra"',
+      'summary error usage diagnosis rules_version archive resolved gate"',
+      'summary error usage diagnosis rules_version archive resolved extra"',
     ],
   ] as const) {
     assert.equal(formatWith(file, before, after), usual, `${file}: ${after}`);
@@ -121,8 +121,8 @@ test("a change to the read-only views shows at the next start, with no rebuild",
   writeFileSync(
     path,
     original.replace(
-      'summary error usage diagnosis rules_version archive resolved"',
-      'summary error usage diagnosis rules_version archive resolved extra"',
+      'summary error usage diagnosis rules_version archive resolved gate"',
+      'summary error usage diagnosis rules_version archive resolved gate extra"',
     ),
   );
   try {
