@@ -8,7 +8,7 @@ import { parseResult, type Result } from "../protocol/validate.ts";
 
 const FAILED = ["没跑成", "FAILED"];
 const NOTHING = ["没事可做", "NOTHING"];
-const RECEIPT_FIELDS = ["ask", "notice", "resolve", "later", "events", "archive"];
+const RECEIPT_FIELDS = ["ask", "notice", "resolve", "later", "events", "archive", "gate"];
 // A fence closes only on a line of its own. A JSON string can't hold a raw newline, so a ``` inside one, as in an issue
 // body carried in an event's detail, is never the end of the block.
 const BLOCK = /(?<=^|\n)[ \t]*```agent-autoloop[ \t]*\r?\n((?:[^\n]*\n)*?)[ \t]*```[ \t]*(?=\r?\n|$)/g;

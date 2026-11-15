@@ -36,6 +36,12 @@ export type ArchiveWriteBack = {
   decisions?: ArchiveEntry[];
 };
 
+/** A judgment round's verdict on a gated instruction: pass, a semantic problem, deny, or unclear when it can't say. */
+export type GateVerdict = {
+  verdict: "pass" | "conflict" | "superseded" | "confirm" | "deny" | "unclear";
+  reason?: string;
+};
+
 export type Result = {
   outcome: "done" | "nothing" | "failed" | "cancelled";
   summary?: string;
@@ -44,6 +50,8 @@ export type Result = {
   usage?: Usage;
   /** 结构化分类，老回执可以没有。含义与分组见 docs/ai-loop/回执分类.md。 */
   diagnosis?: Diagnosis;
+  /** 指令关口判断轮的判定：只由 gate.judge 指定的规则写。 */
+  gate?: GateVerdict;
   ask?: Ask[];
   notice?: Notice[];
   resolve?: { card: number; reason: string }[];
@@ -61,10 +69,14 @@ export type EventInput = {
   detail: string;
   link: string;
   hops: number;
+  /** 这条指令是谁发来的：渠道侧的身份标识（通用写法，不是某个产品名）。 */
+  from: string;
+  /** 代发或转发人：不是 from 本人时关口按越权处理。 */
+  via: string;
 };
 
-const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500 } as const;
-const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops"];
+const LIMITS = { id: 200, subject: 100, summary: 200, detail: 4000, link: 500, from: 200, via: 200 } as const;
+const FIELDS = ["id", "type", "subject", "summary", "detail", "link", "hops", "from", "via"];
 
 export function parseEvent(input: unknown): EventInput {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
@@ -89,6 +101,8 @@ export function parseEvent(input: unknown): EventInput {
     detail: field("detail"),
     link: field("link"),
     hops: hops as number,
+    from: field("from"),
+    via: field("via"),
   };
   // Half a Unicode character is stored and looked up as different bytes, so the same id would never be recognised again.
   if (!event.id.isWellFormed()) throw new InputError("id 里有不完整的字符");
@@ -96,6 +110,12 @@ export function parseEvent(input: unknown): EventInput {
   // The subject and link go into the Agent's prompt, so neither may carry words: a subject is an identifier, a link a
   // web address in plain ASCII (anything else percent-encoded).
   if (!/^[A-Za-z0-9#._:\/@-]*$/.test(event.subject)) throw new InputError("subject 只能用字母、数字和 # . _ : / @ -");
+  // An identity is an identifier too: the gate matches it against the people table and card answers quote it.
+  for (const name of ["from", "via"] as const) {
+    if (!/^[A-Za-z0-9#._:\/@-]*$/.test(event[name])) {
+      throw new InputError(`${name} 是身份标识，只能用字母、数字和 # . _ : / @ -`);
+    }
+  }
   if (event.link && !/^https?:\/\/[\x21-\x7e]+$/.test(event.link)) {
     throw new InputError("link 要是网址，非 ASCII 的字要先编码");
   }
@@ -203,6 +223,10 @@ const validUsage = (usage: unknown) =>
   (isItem(usage) &&
     Object.values(usage as Item).every((count) => typeof count === "number" && Number.isFinite(count) && count >= 0));
 
+const GATE_VERDICTS = ["pass", "conflict", "superseded", "confirm", "deny", "unclear"];
+const validGate = (gate: Item) =>
+  only(gate, ["verdict", "reason"]) && GATE_VERDICTS.includes(gate.verdict as string) && optional(gate.reason, 500);
+
 export function parseResult(input: unknown): Result {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {
     throw new InputError("结果要是一个 JSON 对象");
@@ -222,6 +246,7 @@ export function parseResult(input: unknown): Result {
       "later",
       "events",
       "archive",
+      "gate",
     ])
   ) {
     throw new InputError("结果里有不认识的字段");
@@ -245,6 +270,9 @@ export function parseResult(input: unknown): Result {
   }
   if (!listOf(result.later, 10, validLater)) {
     throw new InputError("later 每一项要有 key，以及带时区的 at 和 about，或者 cancel: true，最多 10 项");
+  }
+  if (result.gate !== undefined && !(isItem(result.gate) && validGate(result.gate as Item))) {
+    throw new InputError(`gate 要有 verdict（${GATE_VERDICTS.join("、")}），reason 最多 500 字`);
   }
   if (result.events !== undefined) {
     if (!items(result.events, 100)) throw new InputError("events 最多 100 项");

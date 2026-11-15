@@ -2,7 +2,7 @@
 // rules between them and, only to be shown, the scheduled tasks that run elsewhere. A mistake is caught here with a
 // message saying where: at start it stops the hub, later it leaves the old rules running and the owner is told.
 import { nextRun, parseCron } from "../kernel/cron.ts";
-import { SCHEDULE, type Rule, type Rules } from "../kernel/rules.ts";
+import { eventRule, SCHEDULE, type Rule, type Rules } from "../kernel/rules.ts";
 
 export class RulesError extends Error {
   readonly issues: string[];
@@ -29,6 +29,9 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const isWords: Check = (value) => Array.isArray(value) && value.every(isText);
 const isSomeWords: Check = (value) => isWords(value) && (value as string[]).length > 0;
 const isId: Check = (value) => typeof value === "string" && ID.test(value);
+const isScore: Check = (value) => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 100;
+/** An identity as events carry it: an identifier, same alphabet as a subject. */
+const isIdentity: Check = (value) => typeof value === "string" && /^[A-Za-z0-9#._:\/@-]{1,200}$/.test(value);
 const isCount: Check = (value) => Number.isInteger(value) && (value as number) > 0;
 const isTypes: Check = (value) => isSomeWords(value) && (value as string[]).every((type) => TYPE_PATTERN.test(type));
 const isCron: Check = (value) => typeof value === "string" && parseCron(value) !== null;
@@ -95,6 +98,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["tell", (value) => TELLS.includes(value as string), `只能是 ${TELLS.join("、")}`, true],
     ["emits", isObject, "要是一个对象", true],
     ["channels", isSomeWords, "要是通道编号的列表", true],
+    ["gate", (value) => value === true, "开关口只能写 true", true],
     [
       "project",
       (value) => typeof value === "string" && Object.hasOwn(rules.projects ?? {}, value),
@@ -114,6 +118,7 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     checkFields(issues, `${where}的 when `, when, [["cron", isCron, "不是有效的 cron"]]);
   }
   if (!isObject(rule)) return;
+  if (rule.gate === true && !eventRule(rule)) issues.push(`${where}是定时规则，指令关口只开在事件规则上`);
   // A plain command needs no words: a script that polls something is an agent too.
   if (!rule.skill && !rule.prompt && rules.agents[rule.to]?.use !== "command") {
     issues.push(`${where}的 skill 和 prompt 至少写一个`);
@@ -148,6 +153,8 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
     ["channels", isObject, "要是一个对象", true],
     ["projects", isObject, "要是一个对象", true],
     ["defaultChannels", isSomeWords, "要是通道编号的列表", true],
+    ["people", isObject, "要是一个对象", true],
+    ["gate", isObject, "要是一个对象", true],
     ["rules", Array.isArray, "要是一个列表"],
     ["elsewhere", Array.isArray, "要是一个列表", true],
   ]);
@@ -178,6 +185,35 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
     if (!Object.hasOwn(rules.channels, channel))
       issues.push(`rules.json 的 defaultChannels 不是已登记的通道：${channel}`);
   }
+  for (const [id, person] of Object.entries(rules.people ?? {})) {
+    if (!ID.test(id)) issues.push(`people 的人名${ID_WORDS}：${id}`);
+    if (!isObject(person) || !Object.keys(person).length) {
+      issues.push(`people「${id}」要写这个人各渠道的身份，如 {"chat": "id_xx"}`);
+      continue;
+    }
+    for (const [channel, identity] of Object.entries(person)) {
+      if (!ID.test(channel)) issues.push(`people「${id}」的渠道编号${ID_WORDS}：${channel}`);
+      if (!isIdentity(identity))
+        issues.push(`people「${id}」的 ${channel} 身份只能用字母、数字和 # . _ : / @ -，最多 200 字`);
+    }
+  }
+  if (rules.gate !== undefined) {
+    checkFields(issues, "rules.json 的 gate ", rules.gate, [
+      ["judge", isText, NOT_EMPTY],
+      ["thresholds", isObject, "要是一个对象", true],
+      ["unauthorized", (value) => value === "deny" || value === "confirm", "只能是 deny 或 confirm", true],
+    ]);
+    if (isObject(rules.gate) && isObject(rules.gate.thresholds)) {
+      checkFields(issues, "rules.json 的 gate.thresholds ", rules.gate.thresholds, [
+        ["pass", isScore, "要是 0 到 100 的整数"],
+        ["confirm", isScore, "要是 0 到 100 的整数"],
+      ]);
+      const { pass, confirm } = rules.gate.thresholds;
+      if (isScore(pass) && isScore(confirm) && pass >= confirm) {
+        issues.push("rules.json 的 gate.thresholds 里 pass 要小于 confirm");
+      }
+    }
+  }
   for (const [id, project] of Object.entries(rules.projects ?? {})) {
     if (!ID.test(id)) issues.push(`项目的编号${ID_WORDS}：${id}`);
     checkFields(issues, `项目 ${id} `, project, [
@@ -205,6 +241,19 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
   }
   const names = new Set<string>();
   for (const rule of rules.rules) checkRule(issues, rules, rule, names, now);
+  // The judge a gated rule needs must exist, be an event rule, and not be gated itself.
+  if (rules.rules.some((rule) => isObject(rule) && rule.gate === true)) {
+    const judge = rules.rules.find((rule) => rule.name === rules.gate?.judge);
+    if (rules.gate === undefined || !isText(rules.gate.judge)) {
+      issues.push("有规则开了指令关口，但没有 gate.judge 指定判断规则");
+    } else if (!judge) {
+      issues.push(`gate.judge 不是一条规则：${rules.gate.judge}`);
+    } else if (judge.gate === true) {
+      issues.push("gate.judge 自己不能开指令关口");
+    } else if (!eventRule(judge)) {
+      issues.push("gate.judge 要是事件规则");
+    }
+  }
   if (issues.length) throw new RulesError(issues);
   const limits = new Map<string, number | undefined>();
   for (const { group, parallel } of rules.rules) {

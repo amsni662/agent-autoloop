@@ -65,6 +65,8 @@
     },
   },
   "channels": { "feishu": { "name": "飞书", "answerers": ["ou_xxx"] } },
+  "people": { "me": { "feishu": "ou_xxx", "wechat": "wxid_yyy" } }, // 可选：同一个人在不同渠道的身份对成一个人；答复名单和指令关口都按人算
+  "gate": { "judge": "指令判断", "thresholds": { "pass": 30, "confirm": 60 }, "unauthorized": "confirm" }, // 有规则开 gate 时必填，见下面指令关口一段
   "projects": {
     // 可选：项目登记。一个项目是一组规则、一个工作目录和一份档案；规则写 "project": "shop" 就归进去
     "shop": { "name": "商城", "cwd": "~/code/shop", "archive": "archive/shop" },
@@ -86,6 +88,7 @@
       "tell": "needed", // always 每轮做成都发（没事可做、没跑成不发）/ needed 只在有卡片时（默认）/ never 只压住回执里的通知，提问和中台自己的告警照发
       "emits": { "source": "shop", "types": ["pr.*"] }, // 回执里能发什么事件，不写就不能发
       "channels": ["feishu"], // 这条规则的卡片和通知只发到这几个通道，不写就照 defaultChannels
+      "gate": true, // 可选：这条事件规则的指令先过指令关口再派活，只能写 true
     },
   ],
   "elsewhere": [
@@ -119,6 +122,8 @@
 
 `to` 除了写死一个 Agent，也可以写 `role:<角色>`（角色名是小写字母、数字和 `-`）。角色是 `catalog/` 清单里的一条候选链，派单时从上往下取第一个能用的：Agent 已登记、所在设备在线、它的模型没被限流或额度暂停、它还有空位。被跳过的候选和原因记在轮次的 `resolved` 里，`GET /v1/state` 和 `agent-autoloop status` 能看到。整条链都不能用时这一轮排住、只通知一次；有候选说了恢复时刻就推到最早那个时刻再试。写死 Agent 的规则照旧跑，行为不变；中台没有加载清单时 `role:` 规则派不出去，同样只通知一次。清单由 `catalog/manifest.json`（记着 `roles.yaml`、`models.md` 的 sha256）整份校验：坏了或被改过就拒绝，继续用上一份清单并通知一次。`model_holds` 是运行时状态，不写回清单。这是兼容的扩展，原有规则文件不用改。
 
+`people` 把同一个人在不同渠道的身份对成一个人名：渠道 `answerers` 写人名时，这个人任一渠道的身份来答都算数，写原始身份标识也照旧认。事件规则可以写 `"gate": true` 开指令关口：事件先不派活，关口把完关才放行。关口 A 是中台自己算的，合成 0～100 的风险分：同一来源说过一样的话是重复；同一事项已完成更新的工作、或同一来源有更新的指令先到是乱序过期；发指令的人不在 `people` 里、不在这条规则各通道的答复名单里、经别人代发或转发（`via` 不是本人）是越权，不带身份也算越权；和这个人平时的渠道、时段、设备比不一样是场景突变（这个人的历史不到五条时不计分）。重复不跑判断也不跑活：发卡片说明之前那次执行成什么样，问要不要重跑。越权按 `gate.unauthorized` 处理：`deny` 直接拒绝并告知，`confirm`（默认）发卡片强确认。风险分到 `thresholds.confirm`（默认 60）直接出强确认卡。剩下的派一轮 `gate.judge` 指定的判断规则——一条事件规则，通常用 `role:quick`——读出指令的意思：和在做的或之前的指令冲突、被更新的指令取代或撤销、指代不清。判断轮的 `when` 只是让规则成立的形式，关口直接派它；指令文字只进它的 context 资料文件，不进提示词。判断轮回执写 `gate: { "verdict": "pass"|"conflict"|"superseded"|"confirm"|"deny"|"unclear", "reason": "…" }`：`pass` 且风险分低于 `thresholds.pass`（默认 30）时派活；`deny` 拒绝并告知；其余判定、判断轮没跑成、被停掉、没写判定都按强确认出卡，不默认放行。确认绑定这条指令本身：同一事件、同一规则、答复人，指令换一种说法是另一个事件，要重新过闸；卡片回答只放行自己的那一条，答过的不算数，选项第一项是放行、其余是不放行；卡片被结案而没有回答，指令记为不放行。每一条被扣下和放行的指令在 `gates` 表里留记录（分数、理由、判定、去向、谁决定的），事实日志能重建；项目规则经关口确认后的回答照本人拍板写进 `决定.md`。这是兼容的扩展：不写 `gate` 的规则和老配置行为不变，`people` 没配时开闸的规则把任何带身份的指令都当成名单外。
+
 回执里的 `error`、诊断的 `raw` 和 `explain` 进日志、投影、卡片和档案之前先脱敏：令牌、私钥、授权头、`名=值` 写法的凭据换成 `[已脱敏]`。老接单程序送来的原文按同一套规则处理。
 
 不管写没写 `resume`，一轮要接的会话里如果还有别的轮次没结束，或者没了音信、可能还在跑，这一轮就开新会话，不让两个进程开同一个会话；回答和复查的内容照样带给它。
@@ -135,8 +140,10 @@ POST /v1/events                    Authorization: Bearer <来源的密钥>
 
 - `id` 和 `type` 必填。同一来源同一 `id` 只记一次，所以来源尽管重发。
 - `subject` 只能是标识符（字母、数字和 `# . _ : / @ -`），`link` 只能是纯 ASCII 网址，因为它们会进提示词。`summary`、`detail` 不进提示词。
+- `from`、`via` 可选：发指令的人、代发或转发的人的身份标识，写法同 `subject`（字母、数字和 `# . _ : / @ -`，最多 200 字）。开了指令关口的规则靠 `from` 认人、`via` 和 `from` 不同按越权处理；别的规则不看。这是兼容的扩展，老来源不带这两个字段照收。
+- 应答的 `routed` 是匹配的规则；开了关口的规则同时出现在 `gated` 里，形如 `[{ "rule": "处理意见", "state": "judging" | "carded" | "denied" }]`，表示这条指令被扣在关口等判断、等本人确认或被拒绝——放行后轮的 `runs` 照常查。没开闸的规则不出现 `gated`。
 - 没有规则匹配的事件也留着，`agent-autoloop status` 看得到。
-- 字段上限：`id` 200 个字、`subject` 100、`summary` 200、`detail` 4000、`link` 500，`type` 64 个字符。
+- 字段上限：`id` 200 个字、`subject` 100、`summary` 200、`detail` 4000、`link` 500，`from`、`via` 各 200，`type` 64 个字符。
 
 来源想知道发出去的事件后来怎么样了，用同一把密钥按应答里的 `event` 编号查，隔一段时间查一下还没结束的就行：
 
@@ -242,7 +249,8 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
   "resolve": [{ "card": 3, "reason": "在哪核实了已解决" }],
   "later":   [{ "key": "…", "at": "2026-11-05T09:00:00+08:00", "about": "到时候查什么" }, { "key": "…", "cancel": true }],
   "events":  [{ "id", "type", "subject", "summary", "detail", "link" }],
-  "archive": { "base": 3, "log": ["一条进展"], "status": "新的状态整篇（要改才写）", "decisions": ["一条决定"] }
+  "archive": { "base": 3, "log": ["一条进展"], "status": "新的状态整篇（要改才写）", "decisions": ["一条决定"] },
+  "gate": { "verdict": "pass", "reason": "…" }
 }
 ```
 
@@ -258,6 +266,7 @@ POST /v1/runs/12/result    Authorization: Bearer <token>   Result
 - `later` 的 `key` 范围是这个事项，同一个 `key` 再写一次就是改时间。
 - `events` 的来源由规则的 `emits` 决定，回执改不了。
 - `archive` 是项目规则的档案写回（约定见[项目档案](ai-loop/项目档案.md)）：`base` 必填，是这一轮读到的版本号；`log`、`decisions` 逐条追加，`status` 整篇替换。`base` 落后当前版本时可追加的照合并、`status` 不覆盖，那一轮标 `conflict` 并发卡片问本人。项目规则的 `done` 回执不带 `archive` 段时这一轮标 `missing` 并提醒（`command` 类 Agent 豁免）；项目规则的每一轮结束后中枢还会自动往 `日志.md` 追加一条记录，不需要回执做什么。
+- `gate` 只有 `gate.judge` 指定的判断规则的轮次才有用：`verdict` 是对扣着的那条指令的判定（`pass`、`conflict`、`superseded`、`confirm`、`deny`、`unclear`），`reason` 可选、最多 500 字。别的轮次写了不生效；判断轮没写或写不出来都按拿不准处理。
 
 ### Agent 只需要做一件事
 
@@ -318,7 +327,7 @@ GET /v1/cards/next?wait=50    Authorization: Bearer <通道的密钥>
 - 发完报告：`POST /v1/cards/56/delivered { "version": 2, "ref": "om_xxx" }`。没报告的过一分钟会再给你。**支持幂等键的平台，发新消息只用卡片编号，不带版本**（飞书改不动已经结束的卡片时另发一条，这一条才带版本）。平台不支持时无法保证去重，Webhook 模板可能在报告丢失后重发。
 - 发不出去：`POST /v1/cards/56/failed { "version": 2, "error": "…" }`。第一次发送隔得越来越久地重试，一小时后放弃（卡片还开着，`agent-autoloop status` 看得到）；通道一直没来领不算在内。
 - 还没送达就已经解决的卡片不再打扰你；仅告知的 `fyi` 通知在创建后的 24 小时内仍可投递。
-- 你点了：`POST /v1/cards/56/answer { "choice": 1, "by": "ou_xxx", "ref": "om_xxx" }`。只有第一次算数，`by` 要在这个通道的 `answerers` 里，`ref` 要和送达的那条一致。普通通知有一个“已处理”按钮，点了就结案；也可以带 `text` 写一句处理说明，结案时存进卡片的 `answer`，卡面和 `/v1/state` 都看得到。仅告知的 `fyi` 通知没有按钮。
+- 你点了：`POST /v1/cards/56/answer { "choice": 1, "by": "ou_xxx", "ref": "om_xxx" }`。只有第一次算数，`by` 要在这个通道的 `answerers` 里（`answerers` 写人名时，这个人在 `people` 里登记的任一身份都算数；写原始身份标识照旧认），`ref` 要和送达的那条一致。普通通知有一个“已处理”按钮，点了就结案；也可以带 `text` 写一句处理说明，结案时存进卡片的 `answer`，卡面和 `/v1/state` 都看得到。仅告知的 `fyi` 通知没有按钮。
 
 最小的通道只要十几行：领卡片、发文字和 `link`、报告。`link` 只给配了 `"links": true` 的通道，其他通道这里是 `null`。它打开一个不跑脚本的普通表单页，这张卡片的文字和按钮都在上面，谁拿到链接谁就能答，从卡片创建起 7 天内有效，过期后也不再显示卡片内容，适合只会发文字的群机器人、邮件。能发按钮、能收回调的通道（比如飞书）用按钮，身份由平台核验，更安全。一台电脑上用时 `link` 是本机地址，手机打不开，要手机批请把中台放到有公网地址的机器上，并配好 `publicUrl`。
 

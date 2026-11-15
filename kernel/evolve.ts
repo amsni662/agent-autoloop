@@ -19,6 +19,7 @@ export const TABLES = [
   "quotas",
   "archives",
   "archive_writes",
+  "gates",
 ] as const;
 export type Table = (typeof TABLES)[number];
 export type Change = { table: Table; key: string; row: Row | null };
@@ -26,7 +27,7 @@ export type Fact = { version: 1; seq: number; at: number; type: string; changes:
 export type Match = Record<string, SQLInputValue | SQLInputValue[] | { not: null }>;
 const NUMBERED = new Set<Table>(["events", "runs", "cards", "timers"]);
 const indexes: Partial<Record<Table, string[][]>> = {
-  events: [["source", "key"], ["routed", "id"], ["paused", "id"], ["id"]],
+  events: [["source", "key"], ["routed", "id"], ["paused", "id"], ["id"], ["from", "id"]],
   runs: [["state", "id"], ["rule", "lane", "state", "id"], ["id"], ["finished_at"]],
   run_events: [["run_id"], ["event_id"]],
   cards: [
@@ -52,6 +53,7 @@ const indexes: Partial<Record<Table, string[][]>> = {
     ["state", "key"],
     ["project", "state"],
   ],
+  gates: [["event"], ["state", "key"]],
 };
 const field = (name: string) => `json_extract(data,'$.${name}')`;
 const statements = new WeakMap<DatabaseSync, Map<string, StatementSync>>();
@@ -199,6 +201,7 @@ export function keyOf(table: Table, row: Row): string {
   if (table === "quotas") return `${row.device}|${row.provider}|${row.account}|${row.window}`;
   if (table === "archives") return row.project;
   if (table === "archive_writes") return row.key;
+  if (table === "gates") return row.key;
   return "rules";
 }
 export function empty(db = new DatabaseSync(":memory:")) {

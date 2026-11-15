@@ -58,9 +58,16 @@ export function eventOutcome(view: View, source: string, id: number) {
   const runs = rows(view, "run_events", { event_id: id })
     .map((link) => view.get("runs", link.run_id)!)
     .sort((a, b) => a.id - b.id);
+  const gates = rows(view, "gates", { event: id }).map((gate) => ({
+    rule: gate.rule,
+    state: gate.state,
+    verdict: gate.verdict,
+    score: gate.score,
+  }));
   return {
     event: event.id,
     ...routingOf(event),
+    ...(gates.length && { gates }),
     runs: runs.map((run) => {
       const own = sourceOf(view, run.id) === source;
       const sent = (JSON.parse(run.emitted ?? "[]") as number[]).map((id) => view.get("events", id)!);
@@ -160,10 +167,25 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     askFirst: rules.askFirst,
     ...(archive && { archive }),
     context: {
-      events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
-        const sourceName = rules.sources[source]?.name ?? source;
-        return { id, source, sourceName, type, subject, summary, detail, link, receivedAt, hops: hops ?? 0 };
-      }),
+      events: events.map(
+        ({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops, from, via }) => {
+          const sourceName = rules.sources[source]?.name ?? source;
+          return {
+            id,
+            source,
+            sourceName,
+            type,
+            subject,
+            summary,
+            detail,
+            link,
+            receivedAt,
+            hops: hops ?? 0,
+            from,
+            via,
+          };
+        },
+      ),
       answers: answers.map(({ id: card, title, options, choice, answer: text, about, by, decided_at: at }) => {
         const picked: string[] = JSON.parse(options);
         return {

@@ -20,8 +20,10 @@ import {
   workers,
 } from "./query.ts";
 import {
+  answererIds,
   cronOf,
   eventRule,
+  personOf,
   ROLE_PREFIX,
   ruleOf,
   SCHEDULE,
@@ -45,6 +47,7 @@ import {
   parseUsageReport,
   type Category,
   type Diagnosis,
+  type GateVerdict,
   type Later,
   type Rejected,
   type Result,
@@ -75,13 +78,14 @@ const DEFAULTS: Partial<Record<Table, Row>> = {
     ...CARD_BASICS,
     ...nulls("choice", "answer", "by", "result", "rule", "detail"),
     lane: "",
-    ...nulls("grp", "source", "agent", "session", "run_id", "answer_event"),
+    ...nulls("grp", "source", "agent", "session", "run_id", "answer_event", "gate"),
     version: 1,
     ...nulls("decided_at", "closed_at"),
   },
   deliveries: NOT_DELIVERED,
   archive_writes: nulls("run", "by", "marker", "claimed_at"),
   archives: nulls("commit", "pushed", "push_error", "pushed_at", "updated_at"),
+  gates: nulls("card", "judge_run", "decided_at", "by", "baseline"),
 };
 
 type Given = { type: string; seq: number; now: number; at: string; env: Environment; rules: Rules };
@@ -210,6 +214,11 @@ function closeCard(draft: Draft, card: Row, result: string, by: string | null = 
   const closed = { state: "closed", closed_at: draft.at, version: card.version + 1 };
   // A note says how a notice was handled, for looking back at later.
   put(draft, "cards", card.id, { ...closed, result, by: by ?? card.by, ...(note ? { answer: note } : {}) });
+  // A gate's question closed without an answer keeps its instruction held: nothing ran, the record says why.
+  const gate = card.gate ? draft.view.get("gates", card.gate) : undefined;
+  if (gate?.state === "carded") {
+    put(draft, "gates", gate.key, { state: "denied", verdict: "closed", decided_at: draft.at, by: by ?? card.by });
+  }
 }
 
 function closeOpen(draft: Draft, matches: (key: string) => boolean, result: string) {
@@ -282,6 +291,9 @@ function recordEvent(
     detail: event.detail ?? "",
     link: event.link ?? "",
     hops: event.hops ?? 0,
+    // Who sent the instruction, and who relayed it if anyone did: the gate reads these, nothing else does yet.
+    from: event.from ?? "",
+    via: event.via ?? "",
     routed: JSON.stringify(routed),
     // Only where a pause held it back, so the owner's list of what was skipped reads an index of those alone.
     ...(paused.length && { paused: JSON.stringify(paused) }),
@@ -289,6 +301,331 @@ function recordEvent(
     ...(sent && { sent: 1 }),
     received_at: draft.at,
   }).id;
+}
+
+/** The instruction gate: what rule-computable checks find, before the semantic judge and the owner get a say. */
+
+const gateThresholds = (draft: Draft) => ({
+  pass: draft.rules.gate?.thresholds?.pass ?? 30,
+  confirm: draft.rules.gate?.thresholds?.confirm ?? 60,
+});
+const gateUnauthorized = (draft: Draft) => draft.rules.gate?.unauthorized ?? "confirm";
+
+type GateReason = { kind: string; text: string };
+
+const normalize = (text: string) => text.replace(/\s+/g, " ").trim().toLowerCase();
+const signature = (event: Row) =>
+  [event.type, event.subject, event.summary, event.detail].map((part) => normalize(String(part))).join("\u0001");
+
+/** An earlier event from the same source saying the same thing that this rule already took, or the gate still holds. */
+function duplicateOf(draft: Draft, rule: Rule, event: Row) {
+  const sig = signature(event);
+  for (const older of rows(draft.view, "events", { source: event.source }, 300, true)) {
+    if (older.id === event.id || signature(older) !== sig) continue;
+    const held = draft.view.get("gates", `${rule.name}:${older.id}`);
+    if (held && ["judging", "carded"].includes(held.state)) return { event: older };
+    if (!JSON.parse(older.routed).includes(rule.name)) continue;
+    const run = rows(draft.view, "run_events", { event_id: older.id })
+      .map((link) => draft.view.get("runs", link.run_id))
+      .filter((run) => run?.rule === rule.name)
+      .at(-1);
+    if (run || held?.state === "released") return { event: older, run };
+  }
+  return null;
+}
+
+/** A second event arriving that much after a newer one is out of order, not news. */
+const REORDER = 5 * MINUTE;
+
+/** Score and reasons for an instruction that predates the lane's or the source's progress. */
+function staleOf(draft: Draft, rule: Rule, event: Row, lane: string) {
+  const reasons: GateReason[] = [];
+  let score = 0;
+  const received = Date.parse(event.received_at);
+  const [done] = rows(draft.view, "runs", { rule: rule.name, lane, state: ["done", "nothing", "cancelled"] }, 1, true);
+  if (done && received < Date.parse(done.finished_at)) {
+    score += 40;
+    reasons.push({ kind: "stale", text: `这条指令比同一件事第 ${done.id} 轮已完成的工作还旧` });
+  }
+  const [newest] = rows(draft.view, "events", { source: event.source }, 1, true);
+  if (newest && newest.id !== event.id && Date.parse(newest.received_at) > received + REORDER) {
+    score += 20;
+    reasons.push({ kind: "out-of-order", text: "同一来源有更新的指令先到" });
+  }
+  return { score, reasons };
+}
+
+/** Below this history there is nothing usual to compare an instruction against. */
+const BASELINE_MIN = 5;
+const BASELINE_SCAN = 500;
+
+/** The quarter of the day an event arrived in, in the hub's timezone. */
+function hourBand(rules: Rules, at: string) {
+  const hour = Number(
+    new Intl.DateTimeFormat("en-US", { timeZone: rules.timezone, hour: "numeric", hourCycle: "h23" }).format(
+      Date.parse(at),
+    ),
+  );
+  return Math.floor(hour / 6);
+}
+
+/** What this person's instructions have looked like: their sources, their times of day, the devices that ran them. */
+function baselineOf(draft: Draft, from: string, exclude: number) {
+  const past = rows(draft.view, "events", { from }, BASELINE_SCAN, true).filter((event) => event.id !== exclude);
+  const workers = new Set<string>();
+  for (const event of past.slice(0, 50)) {
+    for (const link of rows(draft.view, "run_events", { event_id: event.id })) {
+      const run = draft.view.get("runs", link.run_id);
+      const worker = run ? workerOf(draft.view, run) : undefined;
+      if (worker) workers.add(worker);
+    }
+  }
+  return {
+    count: past.length,
+    sources: [...new Set(past.map((event) => event.source))],
+    bands: [...new Set(past.map((event) => hourBand(draft.rules, event.received_at)))],
+    workers: [...workers],
+  };
+}
+
+type Baseline = ReturnType<typeof baselineOf>;
+
+function mutationOf(draft: Draft, rule: Rule, event: Row, baseline: Baseline) {
+  const reasons: GateReason[] = [];
+  if (baseline.count < BASELINE_MIN) return { score: 0, reasons };
+  let score = 0;
+  if (!baseline.sources.includes(event.source)) {
+    score += 25;
+    reasons.push({ kind: "mutation", text: "这个人没从这个渠道下过指令" });
+  }
+  if (!baseline.bands.includes(hourBand(draft.rules, event.received_at))) {
+    score += 15;
+    reasons.push({ kind: "mutation", text: "这个人没在这个时段下过指令" });
+  }
+  // A role rule's device is only known at dispatch; the check waits for a fixed agent it can read now.
+  const agent = rule.to.startsWith(ROLE_PREFIX) ? undefined : draft.rules.agents[rule.to];
+  if (agent && baseline.workers.length && !baseline.workers.includes(agent.worker)) {
+    score += 10;
+    reasons.push({ kind: "mutation", text: `这个人的指令没在「${agent.worker}」这台设备上跑过` });
+  }
+  return { score, reasons };
+}
+
+/** Whether the person this identity belongs to may give this rule instructions: the reach channels' answerers. */
+function authorized(draft: Draft, rule: Rule, from: string) {
+  const person = personOf(draft.rules, from);
+  if (!person) return false;
+  const reach = rule.channels ?? draft.rules.defaultChannels ?? Object.keys(draft.rules.channels);
+  const allowed = new Set<string>();
+  for (const channel of reach) for (const id of answererIds(draft.rules, channel)) allowed.add(id);
+  // Nothing to check against counts as configured loosely, not as refusal: the people table already proved the person.
+  return allowed.size === 0 || allowed.has(person) || allowed.has(from);
+}
+
+type GateA = {
+  score: number;
+  reasons: GateReason[];
+  kind?: "duplicate" | "unauthorized";
+  twin?: ReturnType<typeof duplicateOf>;
+  baseline?: Baseline;
+};
+
+/** Gate A: everything the kernel can compute about an instruction without reading what it means. */
+function gateScore(draft: Draft, rule: Rule, event: Row): GateA {
+  const from = event.from ?? "";
+  const via = event.via ?? "";
+  const person = personOf(draft.rules, from);
+  let unauthorized: string | null = null;
+  if (!from) unauthorized = "这条指令没带来源身份";
+  else if (!person) unauthorized = "发指令的人不在身份表里";
+  else if (!authorized(draft, rule, from)) unauthorized = "这个人不在这条规则的答复名单里";
+  else if (via && personOf(draft.rules, via) !== person) unauthorized = "这条指令是别人代发或转发的";
+  if (unauthorized) {
+    return { score: 70, reasons: [{ kind: "unauthorized", text: unauthorized }], kind: "unauthorized" };
+  }
+  const twin = duplicateOf(draft, rule, event);
+  if (twin) {
+    return { score: 50, reasons: [{ kind: "duplicate", text: "和之前那条指令一样" }], kind: "duplicate", twin };
+  }
+  const lane = rule.parallel ? event.subject : "";
+  const stale = staleOf(draft, rule, event, lane);
+  const baseline = baselineOf(draft, from, event.id);
+  const mutation = mutationOf(draft, rule, event, baseline);
+  return {
+    score: Math.min(100, stale.score + mutation.score),
+    reasons: [...stale.reasons, ...mutation.reasons],
+    baseline,
+  };
+}
+
+/** The instruction as the gate binds it: this event, this text, this sender. A changed instruction is another event. */
+const fingerprintOf = (event: Row) =>
+  digest(JSON.stringify([event.type, event.subject, event.summary, event.detail, event.from ?? ""])).slice(0, 16);
+
+/** A confirmation card for a held instruction: its answer releases or refuses this one instruction only. */
+function gateCard(draft: Draft, gate: Row, options: string[], text: string, strong: boolean) {
+  const rule = ruleNamed(draft, gate.rule)!;
+  const event = draft.view.get("events", gate.event)!;
+  const made = createCard(draft, {
+    key: `gate:${gate.key}`,
+    kind: "ask",
+    title: `${strong ? "要强确认" : "要确认"}：「${gate.rule}」的指令`,
+    text,
+    options,
+    recommend: 0,
+    about: "这是指令关口扣下的指令；你的回答只对这条指令这一次有效。",
+    rule: gate.rule,
+    lane: gate.lane,
+    grp: rule.group,
+    source: event.source,
+    gate: gate.key,
+  });
+  put(draft, "gates", gate.key, { state: "carded", card: made.card });
+  return made.card;
+}
+
+const gateBrief = (event: Row) => (event.summary || event.detail).replace(/\s+/g, " ").trim().slice(0, 120);
+
+/** What the gate does with one gated event at arrival: hold it for the judge, for a card, or refuse it. */
+function gateCheck(draft: Draft, rule: Rule, eventId: number): string {
+  const event = draft.view.get("events", eventId)!;
+  const lane = rule.parallel ? event.subject : "";
+  const key = `${rule.name}:${eventId}`;
+  const A = gateScore(draft, rule, event);
+  put(draft, "gates", key, {
+    key,
+    rule: rule.name,
+    lane,
+    event: eventId,
+    fingerprint: fingerprintOf(event),
+    score: A.score,
+    reasons: JSON.stringify(A.reasons),
+    baseline: A.baseline ? JSON.stringify(A.baseline) : null,
+    verdict: "pending",
+    state: "judging",
+    created_at: draft.at,
+  });
+  const thresholds = gateThresholds(draft);
+  const brief = gateBrief(event);
+  const gate = draft.view.get("gates", key)!;
+
+  if (A.kind === "unauthorized" && gateUnauthorized(draft) === "deny") {
+    put(draft, "gates", key, { state: "denied", verdict: "unauthorized", decided_at: draft.at });
+    notify(
+      draft,
+      `gate:${key}`,
+      "有条指令没放行",
+      `「${rule.name}」收到指令「${brief}」，${A.reasons[0].text}，按规则直接拒绝了。`,
+      { once: true },
+    );
+    return "denied";
+  }
+  if (A.kind === "duplicate") {
+    const { run: earlier } = A.twin ?? {};
+    const before = earlier
+      ? `之前那次第 ${earlier.id} 轮${earlier.state === "done" ? "做完了" : earlier.state === "claimed" ? "正在做" : "还在排队"}${earlier.summary ? `：${earlier.summary}` : ""}`
+      : "之前那次还在等确认或判断";
+    put(draft, "gates", key, { verdict: "duplicate" });
+    gateCard(
+      draft,
+      gate,
+      ["重跑一次", "不用"],
+      `这条指令和之前那条一样：「${brief}」。${before}。要照原样重跑一次吗？`,
+      false,
+    );
+    return "carded";
+  }
+  if (A.kind === "unauthorized" || A.score >= thresholds.confirm) {
+    const lines = A.reasons.map((reason) => `- ${reason.text}`).join("\n");
+    put(draft, "gates", key, { verdict: "strong" });
+    gateCard(
+      draft,
+      gate,
+      ["放行，照做", "不放行"],
+      `「${rule.name}」收到指令「${brief}」，先别直接派：\n${lines}`,
+      true,
+    );
+    return "carded";
+  }
+  const judge = draft.rules.rules.find((candidate) => candidate.name === draft.rules.gate?.judge);
+  if (!judge) {
+    put(draft, "gates", key, { verdict: "strong" });
+    gateCard(
+      draft,
+      gate,
+      ["放行，照做", "不放行"],
+      `「${rule.name}」收到指令「${brief}」，关口没配上判断规则，先请你确认。`,
+      true,
+    );
+    return "carded";
+  }
+  const run = enqueue(draft, judge, eventId, `g${eventId}@${rule.name}`);
+  put(draft, "runs", run, { gate: key });
+  put(draft, "gates", key, { judge_run: run });
+  return "judging";
+}
+
+/**
+ * Gate B is back: the judgment round's verdict plus what gate A computed decides release, confirmation or refusal.
+ * The judge failing, stopping or saying nothing definite never passes an instruction.
+ */
+function settleGate(draft: Draft, key: string, judge: GateVerdict | null) {
+  const gate = draft.view.get("gates", key);
+  if (!gate || gate.state !== "judging") return;
+  const rule = ruleNamed(draft, gate.rule);
+  const event = draft.view.get("events", gate.event);
+  const done = (state: string, verdict: string) => put(draft, "gates", key, { state, verdict, decided_at: draft.at });
+  if (!rule || !event) return void done("denied", "rule-gone");
+  const thresholds = gateThresholds(draft);
+  const reasons: GateReason[] = JSON.parse(gate.reasons);
+  const brief = gateBrief(event);
+  let score = gate.score;
+
+  if (judge === null) {
+    score = Math.max(score, 75);
+    reasons.push({ kind: "judge", text: "判断轮没跑成、被停了或没给出判定" });
+  } else if (judge.verdict === "deny") {
+    done("denied", "denied");
+    notify(
+      draft,
+      `gate:${key}`,
+      "有条指令没放行",
+      `「${rule.name}」收到指令「${brief}」，判断轮认为不能放行${judge.reason ? `：${judge.reason}` : "。"}`,
+      { once: true },
+    );
+    return;
+  } else if (judge.verdict !== "pass") {
+    score = Math.max(score, 75);
+    const words: Record<string, string> = {
+      conflict: "和在做的事或之前的指令冲突",
+      superseded: "被更新的指令取代或撤销了",
+      confirm: "判断轮说要本人确认",
+      unclear: "判断轮没把握",
+    };
+    const said = judge.reason?.trim();
+    reasons.push({ kind: "judge", text: said ? `判断轮说：${said}` : (words[judge.verdict] ?? "判断轮没把握") });
+  }
+  // Stale is judged again at release: the lane may have moved on while the judge ran.
+  const stale = staleOf(draft, rule, event, gate.lane);
+  for (const reason of stale.reasons) {
+    if (!reasons.some((held) => held.kind === reason.kind && held.text === reason.text)) reasons.push(reason);
+  }
+  score = Math.min(100, score + stale.score);
+  put(draft, "gates", key, { score, reasons: JSON.stringify(reasons) });
+
+  if (score < thresholds.pass) {
+    enqueue(draft, rule, gate.event, gate.lane);
+    done("released", "pass");
+    return;
+  }
+  const lines = reasons.map((reason) => `- ${reason.text}`).join("\n");
+  gateCard(
+    draft,
+    draft.view.get("gates", key)!,
+    ["放行，照做", "不放行"],
+    `「${rule.name}」收到指令「${brief}」，先别直接派：\n${lines}`,
+    score >= thresholds.confirm,
+  );
 }
 
 function ingest(draft: Draft, source: string, given: unknown, sent = false) {
@@ -317,8 +654,21 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false) {
     const words = `同一条处理链已超过 ${MAX_HOPS} 层，后续事件已记录，没有继续派发。`;
     notify(draft, `hops:${source}:${event.id}`, "事件循环已停止", words, { once: true });
   }
-  for (const rule of taking) enqueue(draft, rule, id, rule.parallel ? event.subject : "");
-  return { event: id, duplicate: false, routed: taking.map((rule) => rule.name), paused };
+  const gated: { rule: string; state: string }[] = [];
+  for (const rule of taking) {
+    if (rule.gate === true) {
+      gated.push({ rule: rule.name, state: gateCheck(draft, rule, id) });
+      continue;
+    }
+    enqueue(draft, rule, id, rule.parallel ? event.subject : "");
+  }
+  return {
+    event: id,
+    duplicate: false,
+    routed: taking.map((rule) => rule.name),
+    paused,
+    ...(gated.length && { gated }),
+  };
 }
 
 function heldRun(draft: Draft, id: number, token: string, states: string[]) {
@@ -611,6 +961,7 @@ function claimNext(draft: Draft, worker: string, claim: string, snapshot?: Row) 
 function stopRun(draft: Draft, run: Row, why: string, summary: string, words: string, detail?: string) {
   put(draft, "runs", run.id, { state: "cancelled", finished_at: draft.at, summary });
   closeStopped(draft, run.id, summary);
+  if (run.gate) settleGate(draft, run.gate, null);
   notify(draft, `run:${run.id}:${why}`, run.rule, words, { ...threadOf(run), ...(detail && { detail }) });
 }
 
@@ -839,6 +1190,11 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
   else rejected = applyReceipt(draft, run, result);
   // 项目规则的每一轮做完都记进档案：自动一行、回执带的写回、本人拍板另走 answer 那条。
   noteArchive(draft, draft.view.get("runs", id)!, result, hash);
+  // A judgment round's receipt carries its verdict for the instruction it held; anything unclear stays held for a card.
+  if (run.gate) {
+    const judged = result.outcome === "done" || result.outcome === "nothing";
+    settleGate(draft, run.gate, judged ? (result.gate ?? null) : null);
+  }
   put(draft, "runs", id, { last_answer: JSON.stringify(rejected) });
   return { rejected };
 }
@@ -847,8 +1203,11 @@ function answer(draft: Draft, id: number, given: Row) {
   const card = draft.view.get("cards", id);
   if (!card) throw new NotFound("没有这张卡片");
   if (given.channel !== undefined) {
-    const allowed = draft.rules.channels[given.channel]?.answerers;
-    if (allowed && !allowed.includes(given.by ?? "")) throw new AuthError("这个人不能回答这张卡片");
+    const channel = draft.rules.channels[given.channel];
+    // Answerers may name people: their identities across channels all count, and raw identities still do.
+    if (channel?.answerers && !answererIds(draft.rules, given.channel).has(given.by ?? "")) {
+      throw new AuthError("这个人不能回答这张卡片");
+    }
     const delivery = draft.view.get("deliveries", `${id}:${given.channel}`);
     if (!delivery?.ref || delivery.ref !== given.ref) throw new AuthError("不是发出去的那条消息");
   }
@@ -876,7 +1235,32 @@ function answer(draft: Draft, id: number, given: Row) {
   const eventId = recordEvent(draft, card.source ?? SCHEDULE, event, rule ? [rule.name] : []);
   const decision = { choice: given.choice ?? null, answer: text, by: given.by ?? null, decided_at: draft.at };
   put(draft, "cards", id, { state: "decided", ...decision, answer_event: eventId, version: card.version + 1 });
-  if (rule) enqueue(draft, rule, eventId, card.lane, card.agent === rule.to ? card.session : null);
+  // A gate card's answer releases or refuses the instruction it held: the first option means go, anything else means no.
+  let holdAnswer = false;
+  const gate = card.gate ? draft.view.get("gates", card.gate) : undefined;
+  if (gate && gate.state === "carded") {
+    const approved = given.choice === 0;
+    const taskRule = approved ? ruleNamed(draft, gate.rule) : undefined;
+    if (taskRule) {
+      // The instruction goes first so the answer lands in the same queued round.
+      enqueue(draft, taskRule, gate.event, gate.lane);
+      put(draft, "gates", gate.key, {
+        state: "released",
+        verdict: "confirmed",
+        decided_at: draft.at,
+        by: given.by ?? null,
+      });
+    } else {
+      put(draft, "gates", gate.key, {
+        state: "denied",
+        verdict: approved ? "rule-gone" : "declined",
+        decided_at: draft.at,
+        by: given.by ?? null,
+      });
+      holdAnswer = true;
+    }
+  }
+  if (rule && !holdAnswer) enqueue(draft, rule, eventId, card.lane, card.agent === rule.to ? card.session : null);
   // 本人对项目规则卡片的回答就是一次拍板：排一条档案写回，外壳把它写进 决定.md。
   const project = rule?.project;
   if (project && draft.rules.projects?.[project]) {
@@ -1269,6 +1653,8 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       closeStopped(draft, id, "已停止");
     } else if (run.state === "claimed") put(draft, "runs", id, { cancel_at: draft.at });
     else throw new InputError("这一轮已经结束了");
+    // A judgment round told to stop settles its instruction the safe way: a card asks instead of a guess passing.
+    if (run.gate) settleGate(draft, run.gate, null);
   },
   resolve(draft, id, reason, by) {
     const card = draft.view.get("cards", id);
